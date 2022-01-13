@@ -73,7 +73,7 @@ index 5694dfd..a45652c 100644
  #include "dds/ddsrt/endian.h"
  #include "dds/ddsrt/md5.h"
 diff --git a/src/ddscxx/tests/CMakeLists.txt b/src/ddscxx/tests/CMakeLists.txt
-index 96231a7..cf38518 100644
+index 96231a7..9e9cb23 100644
 --- a/src/ddscxx/tests/CMakeLists.txt
 +++ b/src/ddscxx/tests/CMakeLists.txt
 @@ -18,7 +18,7 @@ configure_file(
@@ -85,7 +85,7 @@ index 96231a7..cf38518 100644
    find_package(iceoryx_posh_roudi_environment REQUIRED)
  endif()
  
-@@ -99,7 +99,13 @@ else()
+@@ -99,7 +99,17 @@ else()
    set(var "LD_LIBRARY_PATH")
  endif()
  
@@ -93,7 +93,11 @@ index 96231a7..cf38518 100644
 +# AGAIN!
 +if(CYCLONEDDS_MODULE)
 +  get_target_property(_ddslibdir CycloneDDS::ddsc INTERFACE_LINK_DIRECTORIES)
-+  find_library(cyclonedds_lib ddsc ${_ddslibdir} NO_DEFAULT_PATH)
++  if(WIN32)
++    get_filename_component(cyclonedds_lib "${_ddslibdir}/../bin/ddsc.dll" ABSOLUTE)
++  else()
++    find_library(cyclonedds_lib ddsc ${_ddslibdir} NO_DEFAULT_PATH)
++  endif()
 +else()
 +  get_target_property(cyclonedds_lib CycloneDDS::ddsc LOCATION)
 +endif()

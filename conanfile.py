@@ -137,10 +137,10 @@ class cycloneddsCxxConan(ConanFile):
             return ["dl"] if self.settings.os in ["Linux", "FreeBSD"] else []
 
         def cyclonedds_ddsc():
-            return ['cyclonedds::cyclonedds']  # really CycloneDDS::ddsc
+            return ['cyclonedds::ddsc']
 
         def cyclonedds_idl():
-            return ['cyclonedds::cyclonedds']  # really CycloneDDS::idl
+            return ['cyclonedds::idl']
 
         def libcxx():
             libcxx = tools.stdcpp_library(self)
