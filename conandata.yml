@@ -1,0 +1,15 @@
+---
+sources:
+  0.8.2:
+    sha256: 3f666989c06df225e9e86845cfd2c9345d46111543c1743eb4ab3ec1191e6770
+    url:
+      - https://github.com/eclipse-cyclonedds/cyclonedds-cxx/archive/refs/tags/0.8.2.tar.gz
+dependencies:
+  0.8.2:
+    cyclonedds: "0.8.2@sintef/stable"
+    gtest: "[~1.10.0]"  # GTest 1.11.0 fails: https://github.com/google/googletest/issues/3384
+    doxygen: "[~1.9.2]"
+patches:
+  0.8.2:
+    - base_path: source_subfolder
+      patch_file: patches/0.8.2-0001-conanization.patch

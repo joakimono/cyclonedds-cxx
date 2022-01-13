@@ -1,0 +1,47 @@
+name: MSVC Conan
+
+# This workflow is triggered on pushes to the repository.
+on: [push]
+
+env:
+  SINTEF_REFERENCE: "cyclonedds-cxx*"
+  CONAN_UPLOAD: ${{ secrets.CONAN_URL }}
+  CONAN_PASSWORD_SINTEF: ${{ secrets.CONAN_PASSWORD }}
+  CONAN_LOGIN_USERNAME_SINTEF: ${{ secrets.CONAN_USER }}
+  CONAN_NON_INTERACTIVE: True
+  CONAN_USE_ALWAYS_SHORT_PATHS: True
+
+jobs:
+  conan-with-msvc:
+    name: Conan
+    runs-on: ${{ matrix.os }}
+    env:
+      CONAN_USER_HOME_SHORT: C:\c
+      CONAN_USE_ALWAYS_SHORT_PATHS: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler_version: [17]
+        compiler_toolset: [v142, v143]
+        build_type: [Debug, Release]
+        os: [windows-2022]
+        version: [0.8.2]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install prerequisites
+        run: |
+          pip3 install --upgrade setuptools pip requests
+          pip3 install --upgrade conan
+      - name: Configure Conan
+        run: conan remote add sintef ${env:CONAN_UPLOAD} --insert 0
+      - name: Conan create
+        run: |
+          conan create -s build_type=${{ matrix.build_type }} `
+            -s compiler.version=${{ matrix.compiler_version }} `
+            -s compiler.toolset=${{ matrix.compiler_toolset }} `
+            -s compiler.cppstd=17 `
+            -s compiler="Visual Studio" `
+            -b missing -b outdated . ${{ matrix.version }}@sintef/stable
+      - name: Conan upload
+        run: |
+          conan upload --all -c -r sintef ${env:SINTEF_REFERENCE} --retry 5 --retry-wait 20 --force

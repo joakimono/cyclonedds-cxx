@@ -1,0 +1,44 @@
+name: Apple-Clang Conan
+
+# This workflow is triggered on pushes to the repository.
+on: [push]
+
+env:
+  SINTEF_REFERENCE: "cyclonedds-cxx*"
+  CONAN_UPLOAD: ${{ secrets.CONAN_URL }}
+  CONAN_PASSWORD_SINTEF: ${{ secrets.CONAN_PASSWORD }}
+  CONAN_LOGIN_USERNAME_SINTEF: ${{ secrets.CONAN_USER }}
+  CONAN_NON_INTERACTIVE: True
+  CONAN_USE_ALWAYS_SHORT_PATHS: True
+
+jobs:
+  conan-with-apple-clang:
+    name: Conan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler_version: ['13.0']
+        build_type: [Debug, Release]
+        os: [macos-11]
+        version: [0.8.2]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install prerequisites
+        run: |
+          pip3 install --upgrade setuptools pip requests
+          pip3 install --upgrade conan
+      - name: Configure Conan
+        run: conan remote add sintef ${CONAN_UPLOAD} --insert 0
+      - name: Conan create
+        run: |
+          conan create \
+            -s build_type=${{ matrix.build_type }} \
+            -s compiler=apple-clang \
+            -s compiler.version=${{ matrix.compiler_version }} \
+            -s compiler.libcxx=libc++ \
+            -s compiler.cppstd=17 \
+            -b missing -b outdated . ${{ matrix.version }}@sintef/stable
+      - name: Conan upload
+        run: |
+          conan upload --all -c -r sintef ${SINTEF_REFERENCE} --retry 5 --retry-wait 20 --force

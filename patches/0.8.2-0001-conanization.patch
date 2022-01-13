@@ -1,0 +1,146 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 37af137..0eae8c3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -219,12 +219,24 @@ install(
+   DESTINATION "${CMAKE_INSTALL_CMAKEDIR}"
+   COMPONENT dev)
+ 
++include(${CMAKE_BINARY_DIR}/conan_paths.cmake)
++
+ find_package(CycloneDDS REQUIRED)
+ # Support for shared memory in Cyclone DDS C++ depends on support for shared
+ # memory being compiled into Cyclone DDS and iceoryx_binding_c being available
+ # If Cyclone DDS is compiled with support for shared memory, Cyclone DDS C++
+ # must be compiled with shared memory too and vice versa.
+-get_target_property(cyclonedds_has_shm CycloneDDS::ddsc SHM_SUPPORT_IS_AVAILABLE)
++if(CYCLONEDDS_MODULE)  # Using conan-generated find module
++  get_target_property(cyclone_defs CycloneDDS::ddsc INTERFACE_COMPILE_DEFINITIONS)
++  list(FIND cyclone_defs "SHM_SUPPORT_IS_AVAILABLE" _shm_idx)
++  if(_shm_idx GREATER -1)
++    set(cyclonedds_has_shm 1)
++  else()
++    set(cyclonedds_has_shm 0)
++  endif()
++else()
++  get_target_property(cyclonedds_has_shm CycloneDDS::ddsc SHM_SUPPORT_IS_AVAILABLE)
++endif()
+ mark_as_advanced(cyclonedds_has_shm)
+ 
+ option(ENABLE_SHM "Enable shared memory support" ${cyclonedds_has_shm})
+@@ -232,9 +244,9 @@ if(ENABLE_SHM)
+   if(NOT cyclonedds_has_shm)
+     message(FATAL_ERROR "Cyclone DDS is NOT compiled with support for shared memory")
+   else()
+-    find_package(iceoryx_binding_c REQUIRED)
++    find_package(iceoryx REQUIRED)
+   endif()
+-  message(STATUS "Found iceoryx_binding_c: (found version \"${iceoryx_binding_c_VERSION}\")")
++  message(STATUS "Found iceoryx_binding_c: (found version \"${iceoryx_VERSION}\")")
+   set(ENABLE_SHM ON)
+   set(DDSCXX_HAS_SHM "1")
+ elseif(cyclonedds_has_shm)
+diff --git a/PackageConfig.cmake.in b/PackageConfig.cmake.in
+index 5fb82e8..e3fbc49 100644
+--- a/PackageConfig.cmake.in
++++ b/PackageConfig.cmake.in
+@@ -15,7 +15,7 @@ find_package(CycloneDDS REQUIRED)
+ 
+ if(@ENABLE_SHM@)
+   include(CMakeFindDependencyMacro)
+-  find_dependency(iceoryx_binding_c)
++  find_dependency(iceoryx)
+ endif()
+ 
+ include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake")
+@@ -25,4 +25,4 @@ if(TARGET CycloneDDS-CXX::idlcxx)
+ endif()
+ 
+ check_required_components("@PROJECT_NAME@")
+-include("${CMAKE_CURRENT_LIST_DIR}/idlcxx/Generate.cmake")
+\ No newline at end of file
++include("${CMAKE_CURRENT_LIST_DIR}/idlcxx/Generate.cmake")
+diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
+index 5694dfd..a45652c 100644
+--- a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
++++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
+@@ -17,6 +17,7 @@
+ #include <cstring>
+ #include <vector>
+ #include <atomic>
++#include <limits>
+ 
+ #include "dds/ddsrt/endian.h"
+ #include "dds/ddsrt/md5.h"
+diff --git a/src/ddscxx/tests/CMakeLists.txt b/src/ddscxx/tests/CMakeLists.txt
+index 96231a7..cf38518 100644
+--- a/src/ddscxx/tests/CMakeLists.txt
++++ b/src/ddscxx/tests/CMakeLists.txt
+@@ -18,7 +18,7 @@ configure_file(
+ 
+ if(ENABLE_SHM)
+   # Packages required packages for SHM tests
+-  find_package(iceoryx_posh REQUIRED)
++  find_package(iceoryx REQUIRED)
+   find_package(iceoryx_posh_roudi_environment REQUIRED)
+ endif()
+ 
+@@ -99,7 +99,13 @@ else()
+   set(var "LD_LIBRARY_PATH")
+ endif()
+ 
+-get_target_property(cyclonedds_lib CycloneDDS::ddsc LOCATION)
++# AGAIN!
++if(CYCLONEDDS_MODULE)
++  get_target_property(_ddslibdir CycloneDDS::ddsc INTERFACE_LINK_DIRECTORIES)
++  find_library(cyclonedds_lib ddsc ${_ddslibdir} NO_DEFAULT_PATH)
++else()
++  get_target_property(cyclonedds_lib CycloneDDS::ddsc LOCATION)
++endif()
+ get_target_property(gtest_lib GTest::GTest IMPORTED_LOCATION)
+ get_target_property(gtest_main_lib GTest::Main IMPORTED_LOCATION)
+ if(ENABLE_SHM)
+diff --git a/src/idlcxx/Generate.cmake b/src/idlcxx/Generate.cmake
+index e64b22e..df3996e 100644
+--- a/src/idlcxx/Generate.cmake
++++ b/src/idlcxx/Generate.cmake
+@@ -49,15 +49,36 @@ function(IDLCXX_GENERATE)
+     list(APPEND _files "${_path}")
+   endforeach()
+ 
++  get_target_property(_is_imported CycloneDDS::idlc IMPORTED)
++  if(_is_imported)
++    get_target_property(_idlc_executable CycloneDDS::idlc LOCATION)
++    set(_idlc_depends "")
++  else()
++    set(_idlc_executable CycloneDDS::idlc)
++    set(_idlc_depends CycloneDDS::idlc)
++  endif()
++
++  get_target_property(_is_imported CycloneDDS-CXX::idlcxx INTERFACE_LINK_DIRECTORIES)
++
++  if(_is_imported)
++    # TODO: there must be a better way than this
++    get_target_property(_idlcxx_dir CycloneDDS-CXX::idlcxx INTERFACE_LINK_DIRECTORIES)
++    find_library(_idlcxx cycloneddsidlcxx ${_idlcxx_dir} NO_DEFAULT_PATH)
++    set(_idlcxx_depends "")
++  else()
++    set(_idlcxx $<TARGET_FILE:CycloneDDS-CXX::idlcxx>)
++    set(_idlcxx_depends CycloneDDS-CXX::idlcxx)
++  endif()
++
+   foreach(_file ${_files})
+     get_filename_component(_name ${_file} NAME_WE)
+     set(_header "${_dir}/${_name}.hpp")
+     list(APPEND _headers "${_header}")
+     add_custom_command(
+       OUTPUT   "${_header}"
+-      COMMAND  CycloneDDS::idlc
+-      ARGS     -l $<TARGET_FILE:CycloneDDS-CXX::idlcxx> ${IDLCXX_ARGS} ${_file}
+-      DEPENDS  ${_files} CycloneDDS::idlc CycloneDDS-CXX::idlcxx)
++      COMMAND  ${_idlc_executable}
++      ARGS     -l ${_idlcxx} ${IDLCXX_ARGS} ${_file}
++      DEPENDS  ${_files} ${_idlc_depends} ${_idlcxx_depends})
+   endforeach()
+ 
+   add_custom_target("${_target}_generate" DEPENDS ${_headers})
