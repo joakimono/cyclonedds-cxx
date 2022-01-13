@@ -72,6 +72,9 @@ iceoryx_posh_testing | ANY | ""
 
 ## Known recipe issues
 
+Option `with_shm=True` does not work on Windows until it is supported by `cyclonedds`.
+
+
 conan-center's package iceoryx does not provide the target
 `iceoryx_posh_roudi_environment`, (and `iceoryx_posh_testing::iceoryx_posh_testing`), so
 `with_tests=True` and `with_shm=True` not work unless the missing packages are found by
