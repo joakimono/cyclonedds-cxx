@@ -101,10 +101,10 @@ index 96231a7..cf38518 100644
  get_target_property(gtest_main_lib GTest::Main IMPORTED_LOCATION)
  if(ENABLE_SHM)
 diff --git a/src/idlcxx/Generate.cmake b/src/idlcxx/Generate.cmake
-index e64b22e..df3996e 100644
+index e64b22e..e7e41e6 100644
 --- a/src/idlcxx/Generate.cmake
 +++ b/src/idlcxx/Generate.cmake
-@@ -49,15 +49,36 @@ function(IDLCXX_GENERATE)
+@@ -49,15 +49,40 @@ function(IDLCXX_GENERATE)
      list(APPEND _files "${_path}")
    endforeach()
  
@@ -122,7 +122,11 @@ index e64b22e..df3996e 100644
 +  if(_is_imported)
 +    # TODO: there must be a better way than this
 +    get_target_property(_idlcxx_dir CycloneDDS-CXX::idlcxx INTERFACE_LINK_DIRECTORIES)
-+    find_library(_idlcxx cycloneddsidlcxx ${_idlcxx_dir} NO_DEFAULT_PATH)
++    if(WIN32)
++      get_filename_component(_idlcxx "${_idlcxx_dir}/../bin/cycloneddsidlcxx.dll" ABSOLUTE)
++    else()
++      find_library(_idlcxx cycloneddsidlcxx ${_idlcxx_dir} NO_DEFAULT_PATH)
++    endif()
 +    set(_idlcxx_depends "")
 +  else()
 +    set(_idlcxx $<TARGET_FILE:CycloneDDS-CXX::idlcxx>)
