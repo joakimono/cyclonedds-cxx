@@ -1,0 +1,19 @@
+diff --git a/src/ddscxx/include/dds/core/xtypes/TypeKind.hpp b/src/ddscxx/include/dds/core/xtypes/TypeKind.hpp
+index a1c3a2f..2328ba4 100644
+--- a/src/ddscxx/include/dds/core/xtypes/TypeKind.hpp
++++ b/src/ddscxx/include/dds/core/xtypes/TypeKind.hpp
+@@ -1,4 +1,4 @@
+-#ifndef OMG_DDS_XTYPE_
++#ifndef OMG_DDS_TYPE_OBJECT_HPP_
+ #define OMG_DDS_TYPE_OBJECT_HPP_
+ 
+ /* Copyright 2010, Object Management Group, Inc.
+@@ -38,7 +38,7 @@ namespace xtypes
+ {
+ struct TypeKind_def
+ {
+-    enum type
++    enum Type
+     {
+         NO_TYPE           =  0, // sentinel indicating "null" value
+         PRIMITIVE_TYPE    = 0x4000,
