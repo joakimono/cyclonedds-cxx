@@ -60,18 +60,6 @@ index 5fb82e8..e3fbc49 100644
 -include("${CMAKE_CURRENT_LIST_DIR}/idlcxx/Generate.cmake")
 \ No newline at end of file
 +include("${CMAKE_CURRENT_LIST_DIR}/idlcxx/Generate.cmake")
-diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
-index 5694dfd..a45652c 100644
---- a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
-+++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
-@@ -17,6 +17,7 @@
- #include <cstring>
- #include <vector>
- #include <atomic>
-+#include <limits>
- 
- #include "dds/ddsrt/endian.h"
- #include "dds/ddsrt/md5.h"
 diff --git a/src/ddscxx/tests/CMakeLists.txt b/src/ddscxx/tests/CMakeLists.txt
 index 96231a7..9e9cb23 100644
 --- a/src/ddscxx/tests/CMakeLists.txt

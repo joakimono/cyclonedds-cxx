@@ -1,0 +1,12 @@
+diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
+index 5694dfd..a45652c 100644
+--- a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
++++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
+@@ -17,6 +17,7 @@
+ #include <cstring>
+ #include <vector>
+ #include <atomic>
++#include <limits>
+ 
+ #include "dds/ddsrt/endian.h"
+ #include "dds/ddsrt/md5.h"

@@ -1,0 +1,2832 @@
+diff --git a/src/ddscxx/CMakeLists.txt b/src/ddscxx/CMakeLists.txt
+index 38150dd..d2bb61e 100644
+--- a/src/ddscxx/CMakeLists.txt
++++ b/src/ddscxx/CMakeLists.txt
+@@ -20,6 +20,7 @@ set(sources
+     src/dds/core/status/State.cpp
+     src/dds/domain/discovery.cpp
+     src/dds/domain/find.cpp
++    src/dds/topic/BuiltinTopic.cpp
+     src/dds/pub/pubdiscovery.cpp
+     src/dds/sub/subdiscovery.cpp
+     src/dds/sub/subfind.cpp
+@@ -59,6 +60,7 @@ set(sources
+     src/org/eclipse/cyclonedds/sub/qos/SubscriberQosDelegate.cpp
+     src/org/eclipse/cyclonedds/topic/find.cpp
+     src/org/eclipse/cyclonedds/topic/hash.cpp
++    src/org/eclipse/cyclonedds/topic/BuiltinDataTopic.cpp
+     src/org/eclipse/cyclonedds/topic/AnyTopicDelegate.cpp
+     src/org/eclipse/cyclonedds/topic/FilterDelegate.cpp
+     src/org/eclipse/cyclonedds/topic/TopicDescriptionDelegate.cpp
+diff --git a/src/ddscxx/include/dds/sub/detail/SamplesHolder.hpp b/src/ddscxx/include/dds/sub/detail/SamplesHolder.hpp
+index 6bfa8ee..e05282d 100644
+--- a/src/ddscxx/include/dds/sub/detail/SamplesHolder.hpp
++++ b/src/ddscxx/include/dds/sub/detail/SamplesHolder.hpp
+@@ -18,7 +18,7 @@
+ 
+ #include <dds/sub/LoanedSamples.hpp>
+ #include "org/eclipse/cyclonedds/sub/AnyDataReaderDelegate.hpp"
+-#include "org/eclipse/cyclonedds/topic/datatopic.hpp"
++#include "org/eclipse/cyclonedds/topic/BuiltinDataTopic.hpp"
+ 
+ namespace dds
+ {
+@@ -81,6 +81,12 @@ public:
+         }
+     }
+ 
++    template<typename T_ = T, IsBuiltinTopicType<T_> = true>
++    void set_builtin_sample_contents(void** cxx_sample_pointers, dds_sample_info_t *info)
++    {
++        set_sample_contents(cxx_sample_pointers, info);
++    }
++
+     void fini_samples_buffers(void**& c_sample_pointers, dds_sample_info_t*& c_sample_infos)
+     {
+         delete [] c_sample_pointers;
+@@ -136,24 +142,25 @@ public:
+     void set_sample_contents(void** c_sample_pointers, dds_sample_info_t *info)
+     {
+       struct ddsi_serdata **cdr_blobs = reinterpret_cast<struct ddsi_serdata **>(c_sample_pointers);
+-      uint32_t cpp_sample_size = this->samples_.delegate()->length();
++      const uint32_t cpp_sample_size = this->samples_.delegate()->length();
+       for (uint32_t i = 0; i < cpp_sample_size; ++i)
+       {
++        struct ddsi_serdata * current_blob = cdr_blobs[i];
++        org::eclipse::cyclonedds::topic::CDRBlob &sample_data = (*this->samples_.delegate())[i].delegate().data();
++        // update the data kind
++        sample_data.kind(static_cast<org::eclipse::cyclonedds::topic::BlobKind>(current_blob->kind));
++
++        // if data is transferred using SHM, update the CDRBlob with iox_chunk
++        if(!update_cdrblob_from_iox_chunk(*current_blob, sample_data)) {
+           ddsrt_iovec_t blob_content;
+-          struct ddsi_serdata *current_blob = cdr_blobs[i];
+           ddsi_serdata_to_ser_ref(current_blob, 0, ddsi_serdata_size(current_blob), &blob_content);
+-          org::eclipse::cyclonedds::topic::CDRBlob &sample_data = (*this->samples_.delegate())[i].delegate().data();
+-          memcpy(sample_data.encoding().data(), blob_content.iov_base, 4);
+-          sample_data.kind(static_cast<org::eclipse::cyclonedds::topic::BlobKind>(current_blob->kind));
+-          if (sample_data.kind() != org::eclipse::cyclonedds::topic::BlobKind::Empty)
+-          {
+-              sample_data.payload().assign(
+-                      reinterpret_cast<uint8_t *>(blob_content.iov_base) + 4,
+-                      reinterpret_cast<uint8_t *>(blob_content.iov_base) + blob_content.iov_len);
+-          }
++          copy_buffer_to_cdr_blob(reinterpret_cast<uint8_t *>(blob_content.iov_base),
++                                  blob_content.iov_len, sample_data.kind(), sample_data);
+           ddsi_serdata_to_ser_unref(current_blob, &blob_content);
+           ddsi_serdata_unref(current_blob);
+-          org::eclipse::cyclonedds::sub::AnyDataReaderDelegate::copy_sample_infos(info[i], (*samples_.delegate())[i].delegate().info());
++        }
++        // copy sample infos
++        org::eclipse::cyclonedds::sub::AnyDataReaderDelegate::copy_sample_infos(info[i], (*samples_.delegate())[i].delegate().info());
+       }
+     }
+ 
+@@ -166,13 +173,66 @@ public:
+ private:
+     dds::sub::LoanedSamples<org::eclipse::cyclonedds::topic::CDRBlob>& samples_;
+     uint32_t index_;
++
++    void copy_buffer_to_cdr_blob(const uint8_t * buffer, const size_t size,
++                                 const org::eclipse::cyclonedds::topic::BlobKind data_kind,
++                                 org::eclipse::cyclonedds::topic::CDRBlob & cdr_blob) const
++    {
++      // update the CDR header
++      memcpy(cdr_blob.encoding().data(), buffer, CDR_HEADER_SIZE);
++      // if the data kind is not empty
++      if (data_kind != org::eclipse::cyclonedds::topic::BlobKind::Empty) {
++        // get the actual data from the buffer
++        cdr_blob.payload().assign(buffer + CDR_HEADER_SIZE, buffer + size);
++      }
++    }
++
++  bool update_cdrblob_from_iox_chunk (ddsi_serdata & current_blob,
++                                      org::eclipse::cyclonedds::topic::CDRBlob &sample_data) {
++#ifdef DDSCXX_HAS_SHM
++        // if the data is available on SHM
++        if (current_blob.iox_chunk && current_blob.iox_subscriber) {
++            // get the user iox header
++            auto iox_header = iceoryx_header_from_chunk(current_blob.iox_chunk);
++            // if the iox chunk has the data in serialized form
++            if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
++              copy_buffer_to_cdr_blob(reinterpret_cast<uint8_t *>(current_blob.iox_chunk),
++                                      iox_header->data_size, sample_data.kind(), sample_data);
++            } else if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
++              // serialize the data
++              auto serialized_size = ddsi_sertype_get_serialized_size(current_blob.type,
++                                                                      current_blob.iox_chunk);
++              // create a buffer to serialize
++              std::vector<uint8_t> buffer(serialized_size);
++              // serialize into the buffer
++              ddsi_sertype_serialize_into(current_blob.type, current_blob.iox_chunk, buffer.data(),
++                                          serialized_size);
++              // update the CDR blob with the serialized data
++              copy_buffer_to_cdr_blob(buffer.data(), serialized_size, sample_data.kind(), sample_data);
++            } else {
++              // this shouldn't never happen
++              ISOCPP_THROW_EXCEPTION(ISOCPP_PRECONDITION_NOT_MET_ERROR,
++                                     "The received sample over SHM is not initialized");
++            }
++            // release the chunk
++            free_iox_chunk(static_cast<iox_sub_t *>(current_blob.iox_subscriber), &current_blob.iox_chunk);
++            return true;
++        } else {
++          return false;
++        }
++#else
++        (void) current_blob;
++        (void) sample_data;
++        return false;
++#endif  // DDSCXX_HAS_SHM
++    }
+ };
+ 
+ template <typename T, typename SamplesFWIterator>
+-class SamplesFWInteratorHolder : public SamplesHolder
++class SamplesFWIteratorHolder : public SamplesHolder
+ {
+ public:
+-    SamplesFWInteratorHolder(SamplesFWIterator& it) : iterator(it), size(0)
++    SamplesFWIteratorHolder(SamplesFWIterator& it) : iterator(it), size(0)
+     {
+     }
+ 
+@@ -216,6 +276,20 @@ public:
+       return new dds_sample_info_t[length];
+     }
+ 
++    template<typename T_ = T, IsBuiltinTopicType<T_> = true>
++    void set_builtin_sample_contents(void** cxx_sample_pointers, dds_sample_info_t *info)
++    {
++        /* Samples have already been deserialized in their containers during the read/take call. */
++        SamplesFWIterator tmp_iterator = iterator;
++        for (uint32_t i = 0; i < size; ++i, ++tmp_iterator) {
++            auto ptr = static_cast<ddscxx_serdata<T>*>(cxx_sample_pointers[i]);
++            tmp_iterator->delegate().data() = *ptr->getT();
++            org::eclipse::cyclonedds::sub::AnyDataReaderDelegate::copy_sample_infos(info[i], tmp_iterator->delegate().info());
++            delete(ptr);
++            cxx_sample_pointers[i] = nullptr;
++        }
++    }
++
+     void set_sample_contents(void**, dds_sample_info_t *info)
+     {
+         /* Samples have already been deserialized in their containers during the read/take call. */
+@@ -286,6 +360,20 @@ public:
+         return c_info_pointers;
+     }
+ 
++    template<typename T_ = T, IsBuiltinTopicType<T_> = true>
++    void set_builtin_sample_contents(void** cxx_sample_pointers, dds_sample_info_t *info)
++    {
++        /* Samples have already been deserialized in their containers during the read/take call. */
++        for (uint32_t i = 0; i < size; ++i, ++iterator) {
++            auto ptr = static_cast<ddscxx_serdata<T>*>(cxx_sample_pointers[i]);
++            samples[i].data(*ptr->getT());
++            org::eclipse::cyclonedds::sub::AnyDataReaderDelegate::copy_sample_infos(info[i], samples[i].delegate().info());
++            iterator = samples[i];
++            delete(ptr);
++            cxx_sample_pointers[i] = nullptr;
++        }
++    }
++
+     void set_sample_contents(void**, dds_sample_info_t *info)
+     {
+         /* Samples have already been deserialized in their containers during the read/take call. */
+diff --git a/src/ddscxx/include/dds/sub/detail/TDataReaderImpl.hpp b/src/ddscxx/include/dds/sub/detail/TDataReaderImpl.hpp
+index e97fdd1..76a7330 100644
+--- a/src/ddscxx/include/dds/sub/detail/TDataReaderImpl.hpp
++++ b/src/ddscxx/include/dds/sub/detail/TDataReaderImpl.hpp
+@@ -670,7 +670,7 @@ template<typename SamplesFWIterator>
+ uint32_t
+ dds::sub::detail::DataReader<T>::read(SamplesFWIterator samples, uint32_t max_samples)
+ {
+-    dds::sub::detail::SamplesFWInteratorHolder<T, SamplesFWIterator> holder(samples);
++    dds::sub::detail::SamplesFWIteratorHolder<T, SamplesFWIterator> holder(samples);
+ 
+     this->AnyDataReaderDelegate::read(static_cast<dds_entity_t>(this->ddsc_entity), this->status_filter_, holder, max_samples);
+ 
+@@ -682,7 +682,7 @@ template<typename SamplesFWIterator>
+ uint32_t
+ dds::sub::detail::DataReader<T>::take(SamplesFWIterator samples, uint32_t max_samples)
+ {
+-    dds::sub::detail::SamplesFWInteratorHolder<T, SamplesFWIterator> holder(samples);
++    dds::sub::detail::SamplesFWIteratorHolder<T, SamplesFWIterator> holder(samples);
+ 
+     this->AnyDataReaderDelegate::take(static_cast<dds_entity_t>(this->ddsc_entity), this->status_filter_, holder, max_samples);
+ 
+@@ -1099,7 +1099,7 @@ uint32_t
+ dds::sub::detail::DataReader<T>::read(SamplesFWIterator samples,
+               uint32_t max_samples, const Selector& selector)
+ {
+-    dds::sub::detail::SamplesFWInteratorHolder<T, SamplesFWIterator> holder(samples);
++    dds::sub::detail::SamplesFWIteratorHolder<T, SamplesFWIterator> holder(samples);
+     max_samples = std::min(max_samples, selector.max_samples_);
+ 
+     switch(selector.mode) {
+@@ -1149,7 +1149,7 @@ uint32_t
+ dds::sub::detail::DataReader<T>::take(SamplesFWIterator samples,
+               uint32_t max_samples, const Selector& selector)
+ {
+-    dds::sub::detail::SamplesFWInteratorHolder<T, SamplesFWIterator> holder(samples);
++    dds::sub::detail::SamplesFWIteratorHolder<T, SamplesFWIterator> holder(samples);
+     max_samples = std::min(max_samples, selector.max_samples_);
+ 
+     switch(selector.mode) {
+@@ -1439,6 +1439,191 @@ void dds::sub::detail::DataReader<T>::on_sample_lost(dds_entity_t,
+     l->on_sample_lost(dr, s);
+ }
+ 
++namespace dds {
++namespace sub {
++
++const uint32_t MAX_SAMPLES = 16;
++
++template<typename T, typename H>
++void readtake(
++    H &holder,
++    dds_entity_t ddsc_entity,
++    bool take,
++    const status::DataState &st,
++    uint32_t max_samples,
++    void (*conversion_function) (T*, void*, bool))
++{
++    (void) st;
++    max_samples = std::min<uint32_t>(max_samples,MAX_SAMPLES);
++    void * c_samples[MAX_SAMPLES] = { nullptr };
++    dds_sample_info_t c_infos[MAX_SAMPLES];
++    dds_return_t ret;
++    if (take) {
++        ret = dds_take(ddsc_entity, c_samples, c_infos, max_samples, max_samples);
++        ISOCPP_DDSC_RESULT_CHECK_AND_THROW(ret, "Taking sample failed.");
++    } else {
++        ret = dds_read(ddsc_entity, c_samples, c_infos, max_samples, max_samples);
++        ISOCPP_DDSC_RESULT_CHECK_AND_THROW(ret, "Reading sample failed.");
++    }
++
++    void* cxx_samples[MAX_SAMPLES] = { nullptr };
++    auto ser_type = org::eclipse::cyclonedds::topic::TopicTraits<T>::getSerType();
++    auto n = static_cast<uint32_t>(ret);
++    for (size_t i = 0; i < n; i++) {
++        auto ptr = new ddscxx_serdata<T>(ser_type,SDK_DATA);
++        cxx_samples[i] = ptr;
++        conversion_function(ptr->getT(), c_samples[i], c_infos[i].valid_data);
++    }
++    dds_return_loan(ddsc_entity, c_samples, ret);
++    ddsi_sertype_unref(ser_type);
++
++    holder.set_length(n);
++    if (n > 0)
++        holder.set_builtin_sample_contents(cxx_samples, c_infos);
++}
++
++template<typename T>
++void convert_builtin_participant(
++    T *ptr,
++    void *c_sample,
++    bool valid_data)
++{
++    (void) valid_data;
++    auto c_data = static_cast<dds_builtintopic_participant *>(c_sample);
++    ptr->delegate().key(c_data->key.v);
++    ptr->delegate().qos(c_data->qos);
++}
++
++template<typename T>
++void convert_builtin_topic(
++    T *ptr,
++    void *c_sample,
++    bool valid_data)
++{
++    auto c_data = static_cast<dds_builtintopic_topic *>(c_sample);
++    ptr->delegate().key(c_data->key.d);
++    if (valid_data) {
++        ptr->delegate().name(c_data->topic_name);
++        ptr->delegate().type_name(c_data->type_name);
++    }
++    ptr->delegate().qos(c_data->qos);
++}
++
++template<typename T>
++void convert_builtin_pubsub(
++    T *ptr,
++    void *c_sample,
++    bool valid_data)
++{
++    auto c_data = static_cast<dds_builtintopic_endpoint_t *>(c_sample);
++    ptr->delegate().key(c_data->key.v);
++    ptr->delegate().participant_key(c_data->participant_key.v);
++    if (valid_data) {
++        ptr->delegate().topic_name(c_data->topic_name);
++        ptr->delegate().type_name(c_data->type_name);
++    }
++    ptr->delegate().qos(c_data->qos);
++}
++
++namespace detail {
++#define readtakefunction(TYPE, METHOD, TF, FNCTN)\
++template <> inline ::dds::sub::LoanedSamples<TYPE> \
++DataReader<TYPE>::METHOD() {\
++    ::dds::sub::LoanedSamples<TYPE> samples;\
++    LoanedSamplesHolder<TYPE> holder(samples);\
++    ::dds::sub::status::DataState state;\
++    readtake<TYPE, LoanedSamplesHolder<TYPE> >(\
++        holder, this->ddsc_entity, TF, state, MAX_SAMPLES, &FNCTN<TYPE>);\
++    return samples;\
++}\
++\
++template <> inline ::dds::sub::LoanedSamples<TYPE> \
++DataReader<TYPE>::METHOD(const Selector& selector) {\
++    ::dds::sub::LoanedSamples<TYPE> samples;\
++    LoanedSamplesHolder<TYPE> holder(samples);\
++    switch(selector.mode) {\
++    case SELECT_MODE_READ:\
++        readtake<TYPE, LoanedSamplesHolder<TYPE> >(\
++            holder, this->ddsc_entity, TF, selector.state_filter_, selector.max_samples_, &FNCTN<TYPE>);\
++        break;\
++    default:\
++        ISOCPP_DDSC_RESULT_CHECK_AND_THROW(DDS_RETCODE_UNSUPPORTED, "Using selector failed.");\
++    }\
++    return samples;\
++}
++
++#define iteratorfunction(TYPE, METHOD, TF, FNCTN)\
++template <> template <typename SamplesFWIterator> inline uint32_t \
++DataReader<TYPE>::METHOD(SamplesFWIterator samples, uint32_t max_samples) {\
++    SamplesFWIteratorHolder<TYPE, SamplesFWIterator> holder(samples);\
++    ::dds::sub::status::DataState state;\
++    readtake<TYPE, SamplesFWIteratorHolder<TYPE, SamplesFWIterator> >(\
++        holder, this->ddsc_entity, TF, state, max_samples, &FNCTN<TYPE>);\
++    return holder.get_length();\
++}\
++template <> template <typename SamplesFWIterator> inline uint32_t \
++DataReader<TYPE>::METHOD(SamplesFWIterator samples, uint32_t max_samples, const Selector& selector) {\
++    SamplesFWIteratorHolder<TYPE, SamplesFWIterator> holder(samples);\
++    switch(selector.mode) {\
++    case SELECT_MODE_READ:\
++        readtake<TYPE, SamplesFWIteratorHolder<TYPE, SamplesFWIterator> >(\
++            holder, this->ddsc_entity, TF, selector.state_filter_, std::min<uint32_t>(selector.max_samples_, max_samples), &FNCTN<TYPE>);\
++        break;\
++    default:\
++        ISOCPP_DDSC_RESULT_CHECK_AND_THROW(DDS_RETCODE_UNSUPPORTED, "Using selector failed.");\
++    }\
++    return holder.get_length();\
++}\
++template <> template <typename SamplesBIIterator> inline uint32_t \
++DataReader<TYPE>::METHOD(SamplesBIIterator samples) {\
++    SamplesBIIteratorHolder<TYPE, SamplesBIIterator> holder(samples);\
++    ::dds::sub::status::DataState state;\
++    readtake<TYPE, SamplesBIIteratorHolder<TYPE, SamplesBIIterator> >(\
++        holder, this->ddsc_entity, TF, state, MAX_SAMPLES, &FNCTN<TYPE>);\
++    return holder.get_length();\
++}\
++template <> template <typename SamplesBIIterator> inline uint32_t \
++DataReader<TYPE>::METHOD(SamplesBIIterator samples, const Selector& selector) {\
++    SamplesBIIteratorHolder<TYPE, SamplesBIIterator> holder(samples);\
++    switch(selector.mode) {\
++    case SELECT_MODE_READ:\
++        readtake<TYPE, SamplesBIIteratorHolder<TYPE, SamplesBIIterator> >(\
++            holder, this->ddsc_entity, TF, selector.state_filter_, selector.max_samples_, &FNCTN<TYPE>);\
++        break;\
++    default:\
++        ISOCPP_DDSC_RESULT_CHECK_AND_THROW(DDS_RETCODE_UNSUPPORTED, "Using selector failed.");\
++    }\
++    return holder.get_length();\
++}
++
++#define readtakefunctions(TYPE, FNCTN)\
++readtakefunction(TYPE, read, false, FNCTN)\
++readtakefunction(TYPE, take, true, FNCTN)
++
++#define iteratorfunctions(TYPE, FNCTN)\
++iteratorfunction(TYPE, read, false, FNCTN)\
++iteratorfunction(TYPE, take, true, FNCTN)
++
++#define typefunctions(TYPE, FNCTN)\
++readtakefunctions(TYPE, FNCTN)\
++iteratorfunctions(TYPE, FNCTN)
++
++typefunctions(dds::topic::ParticipantBuiltinTopicData, convert_builtin_participant)
++typefunctions(dds::topic::TopicBuiltinTopicData, convert_builtin_topic)
++typefunctions(dds::topic::SubscriptionBuiltinTopicData, convert_builtin_pubsub)
++typefunctions(dds::topic::PublicationBuiltinTopicData, convert_builtin_pubsub)
++
++/* cleaning up so that the defines do not contaminate other files */
++#undef readtakefunction
++#undef iteratorfunction
++#undef readtakefunctions
++#undef iteratorfunctions
++#undef typefunctions
++
++}  /* namespace detail */
++}  /* namespace sub */
++}  /* namespace dds */
++
+ // End of implementation
+ 
+ #endif /* CYCLONEDDS_DDS_SUB_TDATAREADER_IMPL_HPP_ */
+diff --git a/src/ddscxx/include/dds/topic/BuiltinTopic.hpp b/src/ddscxx/include/dds/topic/BuiltinTopic.hpp
+index ddf08c5..69e12d3 100644
+--- a/src/ddscxx/include/dds/topic/BuiltinTopic.hpp
++++ b/src/ddscxx/include/dds/topic/BuiltinTopic.hpp
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include <dds/topic/detail/BuiltinTopic.hpp>
++#include <dds/topic/TopicTraits.hpp>
+ 
+ namespace dds
+ {
+@@ -34,8 +35,39 @@ typedef dds::topic::detail::PublicationBuiltinTopicData PublicationBuiltinTopicD
+ 
+ typedef dds::topic::detail::SubscriptionBuiltinTopicData SubscriptionBuiltinTopicData;
+ 
+-}
+-}
++template <>
++Topic<ParticipantBuiltinTopicData, detail::Topic>::Topic(
++    const dds::domain::DomainParticipant& dp,
++    const std::string& topic_name);
+ 
++template <>
++Topic<TopicBuiltinTopicData, detail::Topic>::Topic(
++    const dds::domain::DomainParticipant& dp,
++    const std::string& topic_name);
++
++template <>
++Topic<PublicationBuiltinTopicData, detail::Topic>::Topic(
++    const dds::domain::DomainParticipant& dp,
++    const std::string& topic_name);
++
++template <>
++Topic<SubscriptionBuiltinTopicData, detail::Topic>::Topic(
++    const dds::domain::DomainParticipant& dp,
++    const std::string& topic_name);
++
++} /* topic */
++} /* dds */
++
++REGISTER_TOPIC_TYPE(ParticipantBuiltinTopicData)
++REGISTER_TOPIC_TYPE(TopicBuiltinTopicData)
++REGISTER_TOPIC_TYPE(PublicationBuiltinTopicData)
++REGISTER_TOPIC_TYPE(SubscriptionBuiltinTopicData)
++
++template<typename T>
++using IsBuiltinTopicType = std::enable_if_t<
++        std::is_same<T,dds::topic::ParticipantBuiltinTopicData>::value
++     || std::is_same<T,dds::topic::TopicBuiltinTopicData>::value
++     || std::is_same<T,dds::topic::SubscriptionBuiltinTopicData>::value
++     || std::is_same<T,dds::topic::PublicationBuiltinTopicData>::value, bool >;
+ 
+ #endif /* OMG_DDS_TOPIC_BUILTIN_TOPIC_HPP_ */
+diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinDataTopic.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinDataTopic.hpp
+new file mode 100644
+index 0000000..0234290
+--- /dev/null
++++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinDataTopic.hpp
+@@ -0,0 +1,193 @@
++/*
++ * Copyright(c) 2006 to 2021 ADLINK Technology Limited and others
++ *
++ * This program and the accompanying materials are made available under the
++ * terms of the Eclipse Public License v. 2.0 which is available at
++ * http://www.eclipse.org/legal/epl-2.0, or the Eclipse Distribution License
++ * v. 1.0 which is available at
++ * http://www.eclipse.org/org/documents/edl-v10.php.
++ *
++ * SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
++ */
++
++
++/**
++ * @file
++ */
++
++#ifndef CYCLONEDDS_TOPIC_BUILTINDATATOPIC_HPP_
++#define CYCLONEDDS_TOPIC_BUILTINDATATOPIC_HPP_
++
++#include <org/eclipse/cyclonedds/topic/datatopic.hpp>
++#include <dds/topic/BuiltinTopic.hpp>
++#include <org/eclipse/cyclonedds/topic/BuiltinTopicTraits.hpp>
++#include <dds/core/macros.hpp>
++
++/**
++ * Generic builtin topic serdata function declarations.
++ */
++
++OMG_DDS_API_DETAIL
++bool builtin_serdata_eqkey(
++  const ddsi_serdata*,
++  const ddsi_serdata*);
++
++OMG_DDS_API_DETAIL
++uint32_t builtin_serdata_size(
++  const ddsi_serdata*);
++
++OMG_DDS_API_DETAIL
++ddsi_serdata *builtin_serdata_from_ser(
++  const ddsi_sertype*,
++  enum ddsi_serdata_kind,
++  const struct nn_rdata*,
++  size_t size);
++
++OMG_DDS_API_DETAIL
++ddsi_serdata *builtin_serdata_from_ser_iov(
++  const ddsi_sertype*,
++  enum ddsi_serdata_kind,
++  ddsrt_msg_iovlen_t,
++  const ddsrt_iovec_t*,
++  size_t);
++
++OMG_DDS_API_DETAIL
++ddsi_serdata *builtin_serdata_from_keyhash(
++  const ddsi_sertype*,
++  const struct ddsi_keyhash*);
++
++OMG_DDS_API_DETAIL
++ddsi_serdata *builtin_serdata_from_sample(
++  const ddsi_sertype*,
++  enum ddsi_serdata_kind,
++  const void*);
++
++OMG_DDS_API_DETAIL
++void builtin_serdata_to_ser(
++  const ddsi_serdata*,
++  size_t,
++  size_t,
++  void*);
++
++OMG_DDS_API_DETAIL ddsi_serdata *builtin_serdata_to_ser_ref(
++  const ddsi_serdata*,
++  size_t,
++  size_t,
++  ddsrt_iovec_t*);
++
++OMG_DDS_API_DETAIL
++void builtin_serdata_to_ser_unref(
++  ddsi_serdata*,
++  const ddsrt_iovec_t*);
++
++OMG_DDS_API_DETAIL
++bool builtin_serdata_to_sample(
++  const ddsi_serdata*,
++  void*,
++  void**,
++  void*);
++
++OMG_DDS_API_DETAIL
++ddsi_serdata *builtin_serdata_to_untyped(
++  const ddsi_serdata*);
++
++OMG_DDS_API_DETAIL
++bool builtin_serdata_untyped_to_sample(
++  const ddsi_sertype*,
++  const ddsi_serdata*,
++  void*,
++  void**,
++  void*);
++
++OMG_DDS_API_DETAIL
++void builtin_serdata_get_keyhash(
++  const ddsi_serdata*,
++  struct ddsi_keyhash*,
++  bool);
++
++#ifdef DDSCXX_HAS_SHM
++OMG_DDS_API_DETAIL
++uint32_t builtin_serdata_iox_size(
++  const struct ddsi_serdata*);
++
++OMG_DDS_API_DETAIL
++ddsi_serdata * builtin_serdata_from_iox_buffer(
++  const struct ddsi_sertype *,
++  enum ddsi_serdata_kind,
++  void *,
++  void *);
++#endif
++
++/**
++ * Builtin topic serdata function template specialization declarations.
++ */
++
++#ifdef DDSCXX_HAS_SHM
++#define builtin_topic_ops(builtin_topic_type)\
++template <> const ddsi_serdata_ops ddscxx_serdata<dds::topic::builtin_topic_type>::ddscxx_serdata_ops = {\
++  &builtin_serdata_eqkey,\
++  &builtin_serdata_size,\
++  &builtin_serdata_from_ser,\
++  &builtin_serdata_from_ser_iov,\
++  &builtin_serdata_from_keyhash,\
++  &builtin_serdata_from_sample,\
++  &builtin_serdata_to_ser,\
++  &builtin_serdata_to_ser_ref,\
++  &builtin_serdata_to_ser_unref,\
++  &builtin_serdata_to_sample,\
++  &builtin_serdata_to_untyped,\
++  &builtin_serdata_untyped_to_sample,\
++  &serdata_free<dds::topic::builtin_topic_type>,\
++  &serdata_print<dds::topic::builtin_topic_type>,\
++  &builtin_serdata_get_keyhash,\
++  &builtin_serdata_iox_size,\
++  &builtin_serdata_from_iox_buffer\
++};
++#else
++#define builtin_topic_ops(builtin_topic_type)\
++template <> const ddsi_serdata_ops ddscxx_serdata<dds::topic::builtin_topic_type>::ddscxx_serdata_ops = {\
++  &builtin_serdata_eqkey,\
++  &builtin_serdata_size,\
++  &builtin_serdata_from_ser,\
++  &builtin_serdata_from_ser_iov,\
++  &builtin_serdata_from_keyhash,\
++  &builtin_serdata_from_sample,\
++  &builtin_serdata_to_ser,\
++  &builtin_serdata_to_ser_ref,\
++  &builtin_serdata_to_ser_unref,\
++  &builtin_serdata_to_sample,\
++  &builtin_serdata_to_untyped,\
++  &builtin_serdata_untyped_to_sample,\
++  &serdata_free<dds::topic::builtin_topic_type>,\
++  &serdata_print<dds::topic::builtin_topic_type>,\
++  &builtin_serdata_get_keyhash\
++};
++#endif
++
++/**
++ * Due to a bug in MSVC template class static const member need to be initialized in-place.
++ */
++
++#ifdef _WIN32
++#define builtin_topic_ops_decl(builtin_topic_type)\
++builtin_topic_ops(builtin_topic_type)
++#else
++#define builtin_topic_ops_decl(builtin_topic_type)\
++template <> const ddsi_serdata_ops ddscxx_serdata<dds::topic::builtin_topic_type>::ddscxx_serdata_ops;
++#endif
++
++#define builtin_topic_decl(builtin_topic_type)\
++template <> OMG_DDS_API_DETAIL \
++dds::topic::builtin_topic_type* ddscxx_serdata<dds::topic::builtin_topic_type>::getT();\
++template <> OMG_DDS_API_DETAIL \
++bool sertype_serialize_into<dds::topic::builtin_topic_type>(const ddsi_sertype*, const void*, void*, size_t);\
++template <> OMG_DDS_API_DETAIL \
++size_t sertype_get_serialized_size<dds::topic::builtin_topic_type>(const ddsi_sertype*, const void*);\
++builtin_topic_ops_decl(builtin_topic_type)
++
++builtin_topic_decl(ParticipantBuiltinTopicData)
++builtin_topic_decl(TopicBuiltinTopicData)
++builtin_topic_decl(PublicationBuiltinTopicData)
++builtin_topic_decl(SubscriptionBuiltinTopicData)
++
++#endif  /* CYCLONEDDS_TOPIC_BUILTINDATATOPIC_HPP_ */
+diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicDelegate.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicDelegate.hpp
+index 5730d61..d2e31b6 100644
+--- a/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicDelegate.hpp
++++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicDelegate.hpp
+@@ -56,9 +56,9 @@ public:
+         return key_;
+     }
+ 
+-    void key(const int32_t* key)
++    void key(const uint8_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(key));
++        key_.delegate().value(key);
+     }
+ 
+     const ::dds::core::policy::UserData& user_data() const
+@@ -71,6 +71,11 @@ public:
+         user_data_.delegate().set_iso_policy(policy);
+     }
+ 
++    void qos(const dds_qos_t* policy)
++    {
++        user_data(policy);
++    }
++
+     bool operator ==(const ParticipantBuiltinTopicDataDelegate& other) const
+     {
+         return other.key_ == key_ && other.user_data_ == user_data_;
+@@ -89,9 +94,9 @@ public:
+         return key_;
+     }
+ 
+-    void key(const int32_t* key)
++    void key(const uint8_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(key));
++        key_.delegate().value(key);
+     }
+ 
+     const std::string&                  name() const
+@@ -250,6 +255,23 @@ public:
+         topic_data_.delegate().set_iso_policy(policy);
+     }
+ 
++    void qos(const dds_qos_t* policy)
++    {
++        durability(policy);
++#ifdef  OMG_DDS_PERSISTENCE_SUPPORT
++        durability_service(policy);
++#endif  // OMG_DDS_PERSISTENCE_SUPPORT
++        deadline(policy);
++        latency_budget(policy);
++        liveliness(policy);
++        transport_priority(policy);
++        lifespan(policy);
++        destination_order(policy);
++        history(policy);
++        resource_limits(policy);
++        topic_data(policy);
++    }
++
+     bool operator ==(const TopicBuiltinTopicDataDelegate& other) const
+     {
+         return other.key_ == key_
+@@ -309,9 +331,9 @@ public:
+         return key_;
+     }
+ 
+-    void key(const int32_t* key)
++    void key(const uint8_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(key));
++        key_.delegate().value(key);
+     }
+ 
+     const dds::topic::BuiltinTopicKey& participant_key() const
+@@ -319,9 +341,9 @@ public:
+         return participant_key_;
+     }
+ 
+-    void participant_key(const int32_t* key)
++    void participant_key(const uint8_t* key)
+     {
+-        participant_key_.delegate().value(const_cast<int32_t*>(key));
++        participant_key_.delegate().value(key);
+     }
+ 
+     const std::string&                  topic_name() const
+@@ -361,6 +383,11 @@ public:
+         return durability_service_;
+     }
+ 
++    void durability_service(const dds_qos_t* policy)
++    {
++        durability_service_.delegate().set_iso_policy(policy);
++    }
++
+ #endif  // OMG_DDS_PERSISTENCE_SUPPORT
+ 
+ 
+@@ -499,6 +526,28 @@ public:
+         group_data_.delegate().set_iso_policy(policy);
+     }
+ 
++    void qos(const dds_qos_t* policy)
++    {
++        durability(policy);
++    #ifdef  OMG_DDS_PERSISTENCE_SUPPORT
++        durability_service(policy);
++    #endif  // OMG_DDS_PERSISTENCE_SUPPORT
++        deadline(policy);
++        latency_budget(policy);
++        liveliness(policy);
++        reliability(policy);
++        lifespan(policy);
++        user_data(policy);
++        ownership(policy);
++    #ifdef  OMG_DDS_OWNERSHIP_SUPPORT
++        ownership_strength(policy);
++    #endif  // OMG_DDS_OWNERSHIP_SUPPORT
++        destination_order(policy);
++        presentation(policy);
++        partition(policy);
++        topic_data(policy);
++        group_data(policy);
++    }
+ 
+     bool operator ==(const PublicationBuiltinTopicDataDelegate& other) const
+     {
+@@ -567,9 +616,9 @@ public:
+         return key_;
+     }
+ 
+-    void key(const int32_t* key)
++    void key(const uint8_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(key));
++        key_.delegate().value(key);
+     }
+ 
+     const dds::topic::BuiltinTopicKey& participant_key() const
+@@ -577,9 +626,9 @@ public:
+         return participant_key_;
+     }
+ 
+-    void participant_key(const int32_t* key)
++    void participant_key(const uint8_t* key)
+     {
+-        participant_key_.delegate().value(const_cast<int32_t*>(key));
++        participant_key_.delegate().value(key);
+     }
+ 
+     const std::string&                  topic_name() const
+@@ -732,6 +781,23 @@ public:
+         group_data_.delegate().set_iso_policy(policy);
+     }
+ 
++    void qos(const dds_qos_t* policy)
++    {
++        durability(policy);
++        deadline(policy);
++        latency_budget(policy);
++        liveliness(policy);
++        reliability(policy);
++        ownership(policy);
++        destination_order(policy);
++        user_data(policy);
++        time_based_filter(policy);
++        presentation(policy);
++        partition(policy);
++        topic_data(policy);
++        group_data(policy);
++    }
++
+     bool operator ==(const SubscriptionBuiltinTopicDataDelegate& other) const
+     {
+         return other.key_ == key_
+@@ -785,9 +851,9 @@ public:
+         return key_;
+     }
+ 
+-    void key(const int32_t* key)
++    void key(const uint8_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(key));
++        key_.delegate().value(key);
+     }
+ 
+     bool operator ==(const CMParticipantBuiltinTopicDataDelegate& other) const
+@@ -811,9 +877,9 @@ public:
+         return key_;
+     }
+ 
+-    void key(const int32_t* key)
++    void key(const uint8_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(key));
++        key_.delegate().value(key);
+     }
+ 
+     const dds::topic::BuiltinTopicKey&        participant_key() const
+@@ -821,9 +887,9 @@ public:
+         return participant_key_;
+     }
+ 
+-    void participant_key(const int32_t* key)
++    void participant_key(const uint8_t* key)
+     {
+-        participant_key_.delegate().value(const_cast<int32_t*>(key));
++        participant_key_.delegate().value(key);
+     }
+ 
+     const std::string&                        name() const
+@@ -885,9 +951,9 @@ public:
+         return key_;
+     }
+ 
+-    void key(const int32_t* key)
++    void key(const uint8_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(key));
++        key_.delegate().value(key);
+     }
+ 
+     const dds::topic::BuiltinTopicKey&        participant_key() const
+@@ -895,9 +961,9 @@ public:
+         return participant_key_;
+     }
+ 
+-    void participant_key(const int32_t* key)
++    void participant_key(const uint8_t* key)
+     {
+-        participant_key_.delegate().value(const_cast<int32_t*>(key));
++        participant_key_.delegate().value(key);
+     }
+ 
+     const std::string&                        name() const
+@@ -961,7 +1027,7 @@ public:
+ 
+     void key(const dds_qos_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(reinterpret_cast<const int32_t*>(key)));
++        key_.delegate().value(reinterpret_cast<const uint8_t*>(key));
+     }
+ 
+     const dds::topic::BuiltinTopicKey&              publisher_key() const
+@@ -971,7 +1037,7 @@ public:
+ 
+     void publisher_key(const dds_qos_t* key)
+     {
+-        publisher_key_.delegate().value(const_cast<int32_t*>(reinterpret_cast<const int32_t*>(key)));
++        publisher_key_.delegate().value(reinterpret_cast<const uint8_t*>(key));
+     }
+ 
+     const std::string&                              name() const
+@@ -1045,9 +1111,9 @@ public:
+         return key_;
+     }
+ 
+-    void key(const int32_t* key)
++    void key(const uint8_t* key)
+     {
+-        key_.delegate().value(const_cast<int32_t*>(key));
++        key_.delegate().value(key);
+     }
+ 
+     const dds::topic::BuiltinTopicKey&              subscriber_key() const
+@@ -1055,9 +1121,9 @@ public:
+         return subscriber_key_;
+     }
+ 
+-    void subscriber_key(const int32_t* key)
++    void subscriber_key(const uint8_t* key)
+     {
+-        subscriber_key_.delegate().value(const_cast<int32_t*>(key));
++        subscriber_key_.delegate().value(key);
+     }
+ 
+     const std::string&                              name() const
+diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicKeyDelegate.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicKeyDelegate.hpp
+index 00f0bc4..3d61876 100644
+--- a/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicKeyDelegate.hpp
++++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicKeyDelegate.hpp
+@@ -18,6 +18,8 @@
+ #ifndef CYCLONEDDS_TOPIC_BUILTIN_TOPIC_KEY_DELEGATE_HPP_
+ #define CYCLONEDDS_TOPIC_BUILTIN_TOPIC_KEY_DELEGATE_HPP_
+ 
++#include <array>
++
+ namespace org
+ {
+ namespace eclipse
+@@ -29,38 +31,30 @@ namespace topic
+ 
+ class BuiltinTopicKeyDelegate
+ {
+-public:
+-    typedef uint32_t VALUE_T;
+ public:
+     BuiltinTopicKeyDelegate() { }
+-    BuiltinTopicKeyDelegate(int32_t v[])
++    BuiltinTopicKeyDelegate(const uint8_t *v)
+     {
+-        key_[0] = v[0];
+-        key_[1] = v[1];
+-        key_[2] = v[2];
++        memcpy(key_.data(), v, key_.size());
+     }
+ public:
+-    const int32_t* value() const
++    const uint8_t* value() const
+     {
+-        return key_;
++        return key_.data();
+     }
+ 
+-    void value(int32_t v[])
++    void value(const uint8_t *v)
+     {
+-        key_[0] = v[0];
+-        key_[1] = v[1];
+-        key_[2] = v[2];
++        memcpy(key_.data(), v, key_.size());
+     }
+ 
+     bool operator ==(const BuiltinTopicKeyDelegate& other) const
+     {
+-        return other.key_[0] == key_[0]
+-                 && other.key_[1] == key_[1]
+-                 && other.key_[2] == key_[2];
++        return other.key_ == key_;
+     }
+ 
+ private:
+-    int32_t key_[3];
++    std::array<uint8_t, 16> key_;
+ };
+ 
+ }
+diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicTraits.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicTraits.hpp
+index acc2e64..8f003a1 100644
+--- a/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicTraits.hpp
++++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/BuiltinTopicTraits.hpp
+@@ -16,6 +16,142 @@
+ #include <org/eclipse/cyclonedds/topic/TopicTraits.hpp>
+ #include <org/eclipse/cyclonedds/topic/BuiltinTopicCopy.hpp>
+ 
+-/* TODO: add builtin topic traits. */
++namespace org
++{
++namespace eclipse
++{
++namespace cyclonedds
++{
++namespace topic
++{
++
++template <>
++class TopicTraits<dds::topic::ParticipantBuiltinTopicData>
++{
++public:
++  static bool isKeyless()
++  {
++    return true;
++  }
++
++  static const char *getTypeName()
++  {
++    return "dds::topic::ParticipantBuiltinTopicData";
++  }
++
++  static ddsi_sertype *getSerType()
++  {
++    auto *st = new ddscxx_sertype<dds::topic::ParticipantBuiltinTopicData>();
++    return static_cast<ddsi_sertype*>(st);
++  }
++
++  static size_t getSampleSize()
++  {
++    return sizeof(dds::topic::ParticipantBuiltinTopicData);
++  }
++
++  static bool isSelfContained()
++  {
++    return false;
++  }
++};
++
++template <>
++class TopicTraits<dds::topic::TopicBuiltinTopicData>
++{
++public:
++  static bool isKeyless()
++  {
++    return true;
++  }
++
++  static const char *getTypeName()
++  {
++    return "dds::topic::TopicBuiltinTopicData";
++  }
++
++  static ddsi_sertype *getSerType()
++  {
++    auto *st = new ddscxx_sertype<dds::topic::TopicBuiltinTopicData>();
++    return static_cast<ddsi_sertype*>(st);
++  }
++
++  static size_t getSampleSize()
++  {
++    return sizeof(dds::topic::TopicBuiltinTopicData);
++  }
++
++  static bool isSelfContained()
++  {
++    return false;
++  }
++};
++
++template <>
++class TopicTraits<dds::topic::PublicationBuiltinTopicData>
++{
++public:
++  static bool isKeyless()
++  {
++    return true;
++  }
++
++  static const char *getTypeName()
++  {
++    return "dds::topic::PublicationBuiltinTopicData";
++  }
++
++  static ddsi_sertype *getSerType()
++  {
++    auto *st = new ddscxx_sertype<dds::topic::PublicationBuiltinTopicData>();
++    return static_cast<ddsi_sertype*>(st);
++  }
++
++  static size_t getSampleSize()
++  {
++    return sizeof(dds::topic::PublicationBuiltinTopicData);
++  }
++
++  static bool isSelfContained()
++  {
++    return false;
++  }
++};
++
++template <>
++class TopicTraits<dds::topic::SubscriptionBuiltinTopicData>
++{
++public:
++  static bool isKeyless()
++  {
++    return true;
++  }
++
++  static const char *getTypeName()
++  {
++    return "dds::topic::SubscriptionBuiltinTopicData";
++  }
++
++  static ddsi_sertype *getSerType()
++  {
++    auto *st = new ddscxx_sertype<dds::topic::SubscriptionBuiltinTopicData>();
++    return static_cast<ddsi_sertype*>(st);
++  }
++
++  static size_t getSampleSize()
++  {
++    return sizeof(dds::topic::SubscriptionBuiltinTopicData);
++  }
++
++  static bool isSelfContained()
++  {
++    return false;
++  }
++};
++
++}  /* topic */
++}  /* cyclonedds */
++}  /* eclipse */
++}  /* org */
+ 
+ #endif /* CYCLONEDDS_TOPIC_BUILTIN_TOPIC_TRAITS_HPP */
+diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
+index 5694dfd..4bc59e3 100644
+--- a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
++++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
+@@ -28,15 +28,17 @@
+ #include "org/eclipse/cyclonedds/topic/hash.hpp"
+ #include "dds/features.hpp"
+ 
+ // We need this to return the loan back to iceoryx
+ // TODO(Sumanth) fix this, there should be an API in Cyclone DDS which can return the loan back
+ //  to iceoryx, so we don't need to depend on iceoryx directly in the C++ language binding
+ #ifdef DDSCXX_HAS_SHM
+ extern "C" {
+ #include "dds/ddsi/shm_sync.h"
+ }
+ #endif
+ 
++constexpr size_t CDR_HEADER_SIZE = 4U;
++
+ using org::eclipse::cyclonedds::core::cdr::endianness;
+ using org::eclipse::cyclonedds::core::cdr::native_endianness;
+ using org::eclipse::cyclonedds::core::cdr::swap_necessary;
+@@ -87,6 +89,45 @@ static inline const void* calc_offset(const void* ptr, ptrdiff_t n)
+   return static_cast<const void*>(static_cast<const unsigned char*>(ptr) + n);
+ }
+ 
++/// \brief De-serialize the buffer into the sample
++/// \param[in] buffer The buffer to be de-serialized
++/// \param[out] sample Type to which the buffer will be de-serialized
++/// \param[in] data_kind The data kind (data, or key)
++/// \tparam T The sample type
++/// \return True if the deserialization is successful
++///         False if the deserialization failed
++template <typename T>
++bool deserialize_sample_from_buffer(unsigned char * buffer,
++                                    T & sample,
++                                    const ddsi_serdata_kind data_kind=SDK_DATA)
++{
++  endianness stream_endianness = endianness::big_endian;
++  if (*(buffer + 1) == 0x1) {
++    stream_endianness = endianness::little_endian;
++  }
++
++  org::eclipse::cyclonedds::core::cdr::basic_cdr_stream str;
++  str.set_buffer(calc_offset(buffer, CDR_HEADER_SIZE));
++  switch (data_kind) {
++    case SDK_KEY:
++      if (swap_necessary(stream_endianness))
++        key_read_swapped(str, sample);
++      else
++        key_read(str, sample);
++      break;
++    case SDK_DATA:
++      if (swap_necessary(stream_endianness))
++        read_swapped(str, sample);
++      else
++        read(str, sample);
++      break;
++    case SDK_EMPTY:
++      assert(0);
++  }
++
++  return !str.abort_status();
++}
++
+ template <typename T>
+ class ddscxx_sertype : public ddsi_sertype {
+ public:
+@@ -134,66 +175,60 @@ public:
+     return t;
+   }
+ 
+-  T* getT()
+-  {
++  T* getT() {
++    // check if m_t is already set
++    T *t = m_t.load(std::memory_order_acquire);
++    // if m_t is not set
++    if (t == nullptr) {
++      // if the data is available on iox_chunk, update and get the sample
++      update_sample_from_iox_chunk(t);
++      // if its not possible to get the sample from iox_chunk
++      if(t == nullptr) {
++        // deserialize and get the sample
++        deserialize_and_update_sample(static_cast<uint8_t *>(data()), t);
++      }
++    }
++    return t;
++  }
++
++private:
++  void deserialize_and_update_sample(uint8_t * buffer, T *& t) {
++    t = new T();
++    // if deserialization failed
++    if(!deserialize_sample_from_buffer(buffer, *t, kind)) {
++      delete t;
++      t = nullptr;
++    }
++
++    T* exp = nullptr;
++    if (!m_t.compare_exchange_strong(exp, t, std::memory_order_seq_cst)) {
++      delete t;
++      t = exp;
++    }
++  }
++
++  void update_sample_from_iox_chunk(T *& t) {
+ #ifdef DDSCXX_HAS_SHM
+-    // if iox chunk is available, dont deserialize the sample, return the chunk directly
++    // if data is available on the iox_chunk (and doesn't have a serialized representation)
+     if (iox_chunk != nullptr && data() == nullptr) {
+-#ifndef _WIN32
+-#ifndef __clang__
+-# pragma GCC diagnostic push
+-# pragma GCC diagnostic ignored "-Wold-style-cast"
+-#endif
+-#endif
+-      return static_cast<T*>(SHIFT_PAST_ICEORYX_HEADER(this->iox_chunk));
+-#ifndef _WIN32
+-#ifndef __clang__
+-# pragma GCC diagnostic pop
+-#endif
+-#endif
+-    } else
+-#endif  // DDSCXX_HAS_SHM
+-    {
+-      T *t = m_t.load(std::memory_order_acquire);
+-      if (t == nullptr) {
+-        t = new T();
+-        endianness stream_endianness  = endianness::big_endian;
+-        if (*(static_cast<unsigned char*>(data())+1) == 0x1)
+-          stream_endianness = endianness::little_endian;
+-
+-        org::eclipse::cyclonedds::core::cdr::basic_cdr_stream str;
+-        str.set_buffer(calc_offset(data(),4));
+-        switch (kind)
+-        {
+-          case SDK_KEY:
+-            if (swap_necessary(stream_endianness))
+-              key_read_swapped(str,*t);
+-            else
+-              key_read(str,*t);
+-            break;
+-          case SDK_DATA:
+-            if (swap_necessary(stream_endianness))
+-              read_swapped(str,*t);
+-            else
+-              read(str,*t);
+-            break;
+-          case SDK_EMPTY:
+-            assert(0);
+-        }
+-
+-        if (str.abort_status()) {
+-          delete t;
++        auto shm_data_state = shm_get_data_state(iox_chunk);
++        // if the iox chunk has the data in serialized form
++        if (shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
++          deserialize_and_update_sample(static_cast<uint8_t *>(iox_chunk), t);
++        } else if (shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
++          // get the chunk directly without any copy
++          t = static_cast<T*>(this->iox_chunk);
++        } else {
++          // Data is in un-initialized state, which shouldn't happen
+           t = nullptr;
+         }
+-
+-        T* exp = nullptr;
+-        if (!m_t.compare_exchange_strong(exp, t, std::memory_order_seq_cst)) {
+-          delete t;
+-          t = exp;
+-        }
+-      }
+-      return t;
++      } else {
++      // data is not available on iox_chunk
++      t = nullptr;
+     }
++#else
++    t = nullptr;
++#endif  // DDSCXX_HAS_SHM
+   }
+ };
+ 
+@@ -440,18 +475,8 @@ bool serdata_to_sample(
+   (void)buflim;
+   auto ptr = static_cast<const ddscxx_serdata<T>*>(dcmn);
+ 
+-  endianness stream_endianness = endianness::big_endian;
+-  if (*(static_cast<unsigned char*>(ptr->data())+1) == 0x1)
+-    stream_endianness = endianness::little_endian;
+-
+-  org::eclipse::cyclonedds::core::cdr::basic_cdr_stream str;
+-  str.set_buffer(calc_offset(ptr->data(), 4));
+   auto& msg = *static_cast<T*>(sample);
+-  if (swap_necessary(stream_endianness))
+-    read_swapped(str, msg);
+-  else
+-    read(str, msg);
+-  return str.abort_status(); //is true this the correct return value for failure state??
++  return deserialize_sample_from_buffer(static_cast<unsigned char*>(ptr->data()), msg);
+ }
+ 
+ template <typename T>
+@@ -508,21 +533,9 @@ bool serdata_untyped_to_sample(
+   (void)buflim;
+ 
+   auto d = static_cast<const ddscxx_serdata<T>*>(dcmn);
+-
+   T* ptr = static_cast<T*>(sample);
+ 
+-  basic_cdr_stream str;
+-  endianness stream_endianness = endianness::big_endian;
+-  if (*(static_cast<unsigned char*>(d->data())+1) == 0x1)
+-    stream_endianness = endianness::little_endian;
+-
+-  str.set_buffer(calc_offset(d->data(), 4));
+-  if (swap_necessary(stream_endianness))
+-    key_read_swapped(str, *ptr);
+-  else
+-    key_read(str, *ptr);
+-
+-  return !str.abort_status();  //is true the correct value for no errors in streaming?
++  return deserialize_sample_from_buffer(static_cast<unsigned char*>(d->data()), *ptr, SDK_KEY);
+ }
+ 
+ template <typename T>
+@@ -533,13 +546,11 @@ void serdata_free(ddsi_serdata* dcmn)
+ #ifdef DDSCXX_HAS_SHM
+   if (d->iox_chunk && d->iox_subscriber)
+   {
+-    auto iox_sub = *static_cast<iox_sub_t *>(d->iox_subscriber);
+-    shm_lock_iox_sub(iox_sub);
+-    // return the ownership of the memory chunk to iceoryx
+-    iox_sub_release_chunk(iox_sub, d->iox_chunk);
+-    shm_unlock_iox_sub(iox_sub);
+-    // make this pointer to chunk explicitly null
+-    d->iox_chunk = nullptr;
++    // Explicit cast to iox_subscriber is required here, since the C++ binding has no notion of
++    // iox subscriber, but the underlying C API expects this to be a typed iox_subscriber.
++    // TODO (Sumanth), Fix this when we cleanup the interfaces to not use iceoryx directly in
++    //  the C++ plugin
++    free_iox_chunk(static_cast<iox_sub_t *>(d->iox_subscriber), &d->iox_chunk);
+   }
+ #endif
+   delete d;
+@@ -592,13 +603,20 @@ ddsi_serdata * serdata_from_iox_buffer(
+ {
+   try {
+     auto d = new ddscxx_serdata<T>(typecmn, kind);
++
++    // serdata from the loaned sample (when using iceoryx)
+     d->iox_chunk = iox_buffer;
+-    d->iox_subscriber = sub;
+ 
++    // Update the iox subscriber, when constructing the serdata in the case of sample received
++    // from iceoryx
++    if (sub != nullptr) {
++      d->iox_subscriber = sub;
++    }
++
++    // key handling
+     org::eclipse::cyclonedds::core::cdr::basic_cdr_stream str;
+     const auto& msg = *static_cast<const T*>(d->iox_chunk);
+     d->key_md5_hashed() = to_key(str, msg, d->key());
+-    d->setT(&msg);
+     d->populate_hash();
+ 
+     return d;
+@@ -735,11 +753,78 @@ bool sertype_equal(
+   return true;
+ }
+ 
++template <typename T>
++bool sertype_typeid (const struct ddsi_sertype *tpcmn, unsigned char *buf)
++{
++  assert (tpcmn);
++  auto tp = static_cast<const ddscxx_sertype<T>*>(tpcmn);
++
++  uint32_t no_key = tp->typekind_no_key;
++  uint32_t req_keyhash = tp->request_keyhash;
++  uint32_t fixed_size = tp->fixed_size;
++  const void *st_ops = tp->ops, *sd_ops = tp->serdata_ops, *sd_bh = &tp->serdata_basehash, *tn = tp->type_name, *nk = &no_key, *rk = &req_keyhash, *fs = &fixed_size;
++  ddsrt_md5_state_t md5st;
++  ddsrt_md5_init (&md5st);
++  ddsrt_md5_append (&md5st, static_cast<const ddsrt_md5_byte_t *>(st_ops), static_cast<uint32_t>(sizeof (struct ddsi_sertype_ops)));
++  ddsrt_md5_append (&md5st, static_cast<const ddsrt_md5_byte_t *>(sd_ops), static_cast<uint32_t>(sizeof (struct ddsi_serdata_ops)));
++  ddsrt_md5_append (&md5st, static_cast<const ddsrt_md5_byte_t *>(sd_bh), static_cast<uint32_t>(sizeof (tp->serdata_basehash)));
++  ddsrt_md5_append (&md5st, static_cast<const ddsrt_md5_byte_t *>(nk), static_cast<uint32_t>(sizeof (no_key)));
++  ddsrt_md5_append (&md5st, static_cast<const ddsrt_md5_byte_t *>(rk), static_cast<uint32_t>(sizeof (req_keyhash)));
++  ddsrt_md5_append (&md5st, static_cast<const ddsrt_md5_byte_t *>(fs), static_cast<uint32_t>(sizeof (fixed_size)));
++  ddsrt_md5_append (&md5st, static_cast<const ddsrt_md5_byte_t *>(tn), static_cast<uint32_t>(strlen (tp->type_name)));
++  ddsrt_md5_finish (&md5st, static_cast<ddsrt_md5_byte_t *>(buf));
++
++  return true;
++}
++
+ template <typename T>
+ uint32_t sertype_hash(const ddsi_sertype* tpcmn)
+ {
+-  (void)tpcmn;
+-  return 0x0;
++  unsigned char buf[16];
++  void *ptr = buf;
++  sertype_typeid<T>(tpcmn, static_cast<unsigned char*>(ptr));
++  return *static_cast<uint32_t*>(ptr);
++}
++
++template <typename T>
++size_t sertype_get_serialized_size(const ddsi_sertype*, const void * sample)
++{
++  const auto& msg = *static_cast<const T*>(sample);
++
++  // get the serialized size of the sample (with out serializing)
++  org::eclipse::cyclonedds::core::cdr::basic_cdr_stream str;
++  move(str, msg);
++
++  if (str.abort_status()) {
++    // the max value is treated as an error in the Cyclone core
++    return std::numeric_limits<size_t>::max();
++  }
++
++  return str.position() + CDR_HEADER_SIZE;  // Include the additional bytes for the CDR header
++}
++
++template <typename T>
++bool sertype_serialize_into(const ddsi_sertype*,
++                            const void * sample,
++                            void * dst_buffer,
++                            size_t)
++{
++  // cast to the type
++  const auto& msg = *static_cast<const T*>(sample);
++
++  // set the endianess
++  auto ptr = static_cast<unsigned char*>(dst_buffer);
++  memset(ptr, 0x0, 4);
++  if (native_endianness() == endianness::little_endian)
++    *(ptr + 1) = 0x1;
++
++  // serialize the sample into the destination buffer
++  org::eclipse::cyclonedds::core::cdr::basic_cdr_stream str;
++  // TODO(Sumanth), considering the header offset
++  str.set_buffer(calc_offset(dst_buffer, 4));
++  write(str, msg);
++
++  return !str.abort_status();
+ }
+ 
+ template <typename T>
+@@ -752,11 +837,11 @@ const ddsi_sertype_ops ddscxx_sertype<T>::ddscxx_sertype_ops = {
+   sertype_free_samples<T>,
+   sertype_equal<T>,
+   sertype_hash<T>,
+   nullptr, // typeid_hash
+   nullptr, // serialized_size
+   nullptr, // serialize
+   nullptr, // deserialize
+   nullptr  // assignable_from
+ };
+ 
+ #endif  // DDSCXXDATATOPIC_HPP_
+diff --git a/src/ddscxx/src/dds/sub/subfind.cpp b/src/ddscxx/src/dds/sub/subfind.cpp
+index aa7b759..03ae457 100644
+--- a/src/ddscxx/src/dds/sub/subfind.cpp
++++ b/src/ddscxx/src/dds/sub/subfind.cpp
+@@ -26,15 +26,9 @@ namespace sub
+ const Subscriber
+ builtin_subscriber(const dds::domain::DomainParticipant& dp)
+ {
+-    (void)dp;
+-    ISOCPP_THROW_EXCEPTION(ISOCPP_UNSUPPORTED_ERROR, "Function not currently supported");
+-#if 0
+     org::eclipse::cyclonedds::sub::SubscriberDelegate::ref_type ref =
+             org::eclipse::cyclonedds::sub::BuiltinSubscriberDelegate::get_builtin_subscriber(dp);
+     return Subscriber(ref);
+-#else
+-    return Subscriber(dds::core::null);
+-#endif
+ }
+ 
+ }
+diff --git a/src/ddscxx/src/dds/topic/BuiltinTopic.cpp b/src/ddscxx/src/dds/topic/BuiltinTopic.cpp
+new file mode 100644
+index 0000000..871e81d
+--- /dev/null
++++ b/src/ddscxx/src/dds/topic/BuiltinTopic.cpp
+@@ -0,0 +1,94 @@
++/*
++ * Copyright(c) 2021 ADLINK Technology Limited and others
++ *
++ * This program and the accompanying materials are made available under the
++ * terms of the Eclipse Public License v. 2.0 which is available at
++ * http://www.eclipse.org/legal/epl-2.0, or the Eclipse Distribution License
++ * v. 1.0 which is available at
++ * http://www.eclipse.org/org/documents/edl-v10.php.
++ *
++ * SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
++ */
++
++
++/**
++ * @file
++ */
++
++#include <dds/topic/BuiltinTopic.hpp>
++
++namespace dds
++{
++
++namespace topic
++{
++
++class default_builtin_topic_qos: public qos::TopicQos {
++    public:
++        default_builtin_topic_qos(): qos::TopicQos() {
++            const char *partition = "__BUILT-IN PARTITION__";
++            dds_qos_t *qos = dds_create_qos ();
++            dds_qset_durability (qos, DDS_DURABILITY_TRANSIENT_LOCAL);
++            dds_qset_presentation (qos, DDS_PRESENTATION_TOPIC, false, false);
++            dds_qset_reliability (qos, DDS_RELIABILITY_RELIABLE, DDS_MSECS(100));
++            dds_qset_partition (qos, 1, &partition);
++            delegate().ddsc_qos(qos);
++            dds_delete_qos(qos);
++        }
++};
++
++template <>
++Topic<ParticipantBuiltinTopicData, detail::Topic>::Topic(const dds::domain::DomainParticipant& dp,
++                          const std::string& topic_name) :
++::dds::core::Reference< detail::Topic<ParticipantBuiltinTopicData> >(new detail::Topic<ParticipantBuiltinTopicData>(
++              dp,
++              topic_name,
++              "org::eclipse::cyclonedds::builtin::DCPSParticipant",
++              default_builtin_topic_qos(),
++              DDS_BUILTIN_TOPIC_DCPSPARTICIPANT))
++{
++    this->delegate()->init(this->impl_);
++}
++
++template <>
++Topic<TopicBuiltinTopicData, detail::Topic>::Topic(const dds::domain::DomainParticipant& dp,
++                          const std::string& topic_name) :
++::dds::core::Reference< detail::Topic<TopicBuiltinTopicData> >(new detail::Topic<TopicBuiltinTopicData>(
++              dp,
++              topic_name,
++              "org::eclipse::cyclonedds::builtin::DCPSTopic",
++              default_builtin_topic_qos(),
++              DDS_BUILTIN_TOPIC_DCPSTOPIC))
++{
++    this->delegate()->init(this->impl_);
++}
++
++template <>
++Topic<SubscriptionBuiltinTopicData, detail::Topic>::Topic(const dds::domain::DomainParticipant& dp,
++                          const std::string& topic_name) :
++::dds::core::Reference< detail::Topic<SubscriptionBuiltinTopicData> >(new detail::Topic<SubscriptionBuiltinTopicData>(
++              dp,
++              topic_name,
++              "org::eclipse::cyclonedds::builtin::DCPSSubscription",
++              default_builtin_topic_qos(),
++              DDS_BUILTIN_TOPIC_DCPSSUBSCRIPTION))
++{
++    this->delegate()->init(this->impl_);
++}
++
++template <>
++Topic<PublicationBuiltinTopicData, detail::Topic>::Topic(const dds::domain::DomainParticipant& dp,
++                          const std::string& topic_name) :
++::dds::core::Reference< detail::Topic<PublicationBuiltinTopicData> >(new detail::Topic<PublicationBuiltinTopicData>(
++              dp,
++              topic_name,
++              "org::eclipse::cyclonedds::builtin::DCPSPublication",
++              default_builtin_topic_qos(),
++              DDS_BUILTIN_TOPIC_DCPSPUBLICATION))
++{
++    this->delegate()->init(this->impl_);
++}
++
++}
++
++}
+diff --git a/src/ddscxx/src/org/eclipse/cyclonedds/core/EntityDelegate.cpp b/src/ddscxx/src/org/eclipse/cyclonedds/core/EntityDelegate.cpp
+index f912ddf..bd40b77 100644
+--- a/src/ddscxx/src/org/eclipse/cyclonedds/core/EntityDelegate.cpp
++++ b/src/ddscxx/src/org/eclipse/cyclonedds/core/EntityDelegate.cpp
+@@ -62,6 +62,12 @@ org::eclipse::cyclonedds::core::EntityDelegate::~EntityDelegate()
+ 
+ void org::eclipse::cyclonedds::core::EntityDelegate::enable()
+ {
++  if (DDS_BUILTIN_TOPIC_DCPSPARTICIPANT == this->ddsc_entity
++   || DDS_BUILTIN_TOPIC_DCPSTOPIC == this->ddsc_entity
++   || DDS_BUILTIN_TOPIC_DCPSSUBSCRIPTION == this->ddsc_entity
++   || DDS_BUILTIN_TOPIC_DCPSPUBLICATION == this->ddsc_entity)
++    return;
++
+   dds_return_t ret;
+   enabled_ = true;
+   ret = dds_set_listener (this->ddsc_entity, this->listener_callbacks);
+diff --git a/src/ddscxx/src/org/eclipse/cyclonedds/domain/DomainParticipantDelegate.cpp b/src/ddscxx/src/org/eclipse/cyclonedds/domain/DomainParticipantDelegate.cpp
+index ee7c162..15358cd 100644
+--- a/src/ddscxx/src/org/eclipse/cyclonedds/domain/DomainParticipantDelegate.cpp
++++ b/src/ddscxx/src/org/eclipse/cyclonedds/domain/DomainParticipantDelegate.cpp
+@@ -465,6 +465,16 @@ org::eclipse::cyclonedds::domain::DomainParticipantDelegate::lookup_topic(
+ 
+     this->check();
+ 
++    if (topic_name == "DCPSParticipant") {
++        return DDS_BUILTIN_TOPIC_DCPSPARTICIPANT;
++    } else if (topic_name == "DCPSTopic") {
++        return DDS_BUILTIN_TOPIC_DCPSTOPIC;
++    } else if (topic_name == "DCPSPublication") {
++        return DDS_BUILTIN_TOPIC_DCPSPUBLICATION;
++    } else if (topic_name == "DCPSSubscription") {
++        return DDS_BUILTIN_TOPIC_DCPSSUBSCRIPTION;
++    }
++
+     dds_time_t starttime = dds_time();
+     while (true)
+     {
+diff --git a/src/ddscxx/src/org/eclipse/cyclonedds/pub/AnyDataWriterDelegate.cpp b/src/ddscxx/src/org/eclipse/cyclonedds/pub/AnyDataWriterDelegate.cpp
+index 805b111..82a8373 100644
+--- a/src/ddscxx/src/org/eclipse/cyclonedds/pub/AnyDataWriterDelegate.cpp
++++ b/src/ddscxx/src/org/eclipse/cyclonedds/pub/AnyDataWriterDelegate.cpp
+@@ -22,10 +22,15 @@
+ #include <org/eclipse/cyclonedds/core/ScopedLock.hpp>
+ #include <org/eclipse/cyclonedds/topic/BuiltinTopicCopy.hpp>
+ #include <dds/dds.h>
+ #include <dds/ddsc/dds_data_allocator.h>
+ 
+ #include "dds/ddsi/ddsi_sertopic.h"
+ #include "dds/ddsi/q_protocol.h"
++#include "dds/features.hpp"
++
++#ifdef DDSCXX_HAS_SHM
++#include <dds/ddsi/ddsi_shm_transport.h>
++#endif
+ 
+ 
+ namespace org
+@@ -116,6 +121,29 @@ AnyDataWriterDelegate::write_cdr(
+         data->payload().size() + 4);
+ 
+     ser_data->statusinfo = statusinfo;
++    
++    // if shared memory is supported by the writer
++    if(false /*dds_is_loan_available(writer)*/) {
++#ifdef DDSCXX_HAS_SHM
++        void *iox_chunk ;
++        // request a loan from the shared memory buffer
++        ret = dds_loan_shared_memory_buffer(writer,
++                                            data->payload().size() + data->encoding().size(),  // include the size for the encoding (CDR header)
++                                            &iox_chunk);
++        ISOCPP_DDSC_RESULT_CHECK_AND_THROW(ret, "write_cdr - Loaning of chunk failed");
++        ISOCPP_BOOL_CHECK_AND_THROW(iox_chunk, ISOCPP_NULL_REFERENCE_ERROR, "write_cdr - Loaning of chunk failed");
++        // copy the header
++        memcpy(iox_chunk, data->encoding().data(), data->encoding().size());
++        // copy the actual data
++        memcpy(static_cast<unsigned char *>(iox_chunk) + data->encoding().size(),
++               data->payload().data(), data->payload().size());
++        // update SHM data state to serialized, since this API is used only to publish the serialized data
++        shm_set_data_state(iox_chunk, IOX_CHUNK_CONTAINS_SERIALIZED_DATA);
++        // update the loaned iox chunk in serdata
++        ser_data->iox_chunk = iox_chunk;
++#endif
++    }
++
+     if (timestamp != dds::core::Time::invalid()) {
+         dds_time_t ddsc_time = org::eclipse::cyclonedds::core::convertTime(timestamp);
+         ser_data->timestamp.v = ddsc_time;
+@@ -124,7 +152,18 @@ AnyDataWriterDelegate::write_cdr(
+         ret = dds_writecdr(writer, ser_data);
+     }
+ 
++#ifdef DDSCXX_HAS_SHM
++    if (ret != DDS_RETCODE_OK) {
++        if (ser_data->iox_chunk != nullptr) {
++            // write cdr failed, so free the chunk
++            ret = dds_return_loan(writer, &ser_data->iox_chunk, 1);
++            ISOCPP_DDSC_RESULT_CHECK_AND_THROW(ret, "write_cdr, freeing loan failed");
++        }
++        ISOCPP_DDSC_RESULT_CHECK_AND_THROW(ret, "write_cdr failed.");
++    }
++#else
+     ISOCPP_DDSC_RESULT_CHECK_AND_THROW(ret, "write_cdr failed.");
++#endif
+ }
+ 
+ void
+diff --git a/src/ddscxx/src/org/eclipse/cyclonedds/sub/AnyDataReaderDelegate.cpp b/src/ddscxx/src/org/eclipse/cyclonedds/sub/AnyDataReaderDelegate.cpp
+index 7a1de35..4099817 100644
+--- a/src/ddscxx/src/org/eclipse/cyclonedds/sub/AnyDataReaderDelegate.cpp
++++ b/src/ddscxx/src/org/eclipse/cyclonedds/sub/AnyDataReaderDelegate.cpp
+@@ -26,7 +26,7 @@
+ #include <org/eclipse/cyclonedds/topic/BuiltinTopicCopy.hpp>
+ 
+ #include "dds/dds.h"
+ #include "dds/ddsc/dds_data_allocator.h"
+ #include "dds/ddsc/dds_internal_api.h"
+ 
+ namespace org
+diff --git a/src/ddscxx/src/org/eclipse/cyclonedds/sub/BuiltinSubscriberDelegate.cpp b/src/ddscxx/src/org/eclipse/cyclonedds/sub/BuiltinSubscriberDelegate.cpp
+index be922d1..50360bc 100644
+--- a/src/ddscxx/src/org/eclipse/cyclonedds/sub/BuiltinSubscriberDelegate.cpp
++++ b/src/ddscxx/src/org/eclipse/cyclonedds/sub/BuiltinSubscriberDelegate.cpp
+@@ -112,14 +112,7 @@ org::eclipse::cyclonedds::sub::create_builtin_reader(
+ {
+     dds::sub::qos::DataReaderQos rQos;
+ 
+-    dds::topic::Topic<T> topic =
+-            dds::topic::find< dds::topic::Topic<T> >(subscriber.participant(), topic_name);
+-    if (topic.is_nil()) {
+-        topic = dds::topic::discover< dds::topic::Topic<T> >(subscriber.participant(), topic_name, dds::core::Duration::zero());
+-        if (topic.is_nil()) {
+-            ISOCPP_THROW_EXCEPTION(ISOCPP_ERROR, "Could not find builtin topic \"%s\"", topic_name.c_str());
+-        }
+-    }
++    dds::topic::Topic<T> topic(subscriber.participant(), topic_name);
+     subscriber.default_datareader_qos(rQos);
+     rQos = topic.qos();
+     dds::sub::DataReader<T> reader(subscriber.wrapper(), topic, rQos);
+@@ -137,13 +130,13 @@ org::eclipse::cyclonedds::sub::BuiltinSubscriberDelegate::get_builtin_reader(
+     org::eclipse::cyclonedds::sub::AnyDataReaderDelegate::ref_type builtin_reader;
+ 
+     if (topic_name == "DCPSParticipant") {
+-        builtin_reader = create_builtin_reader<dds::topic::ParticipantBuiltinTopicData>(subscriber, topic_name).delegate();
++        builtin_reader = org::eclipse::cyclonedds::sub::create_builtin_reader<dds::topic::ParticipantBuiltinTopicData>(subscriber, topic_name).delegate();
+     } else if (topic_name == "DCPSTopic") {
+-        builtin_reader = create_builtin_reader<dds::topic::TopicBuiltinTopicData>(subscriber, topic_name).delegate();
++        builtin_reader = org::eclipse::cyclonedds::sub::create_builtin_reader<dds::topic::TopicBuiltinTopicData>(subscriber, topic_name).delegate();
+     } else if (topic_name == "DCPSPublication") {
+-        builtin_reader = create_builtin_reader<dds::topic::PublicationBuiltinTopicData>(subscriber, topic_name).delegate();
++        builtin_reader = org::eclipse::cyclonedds::sub::create_builtin_reader<dds::topic::PublicationBuiltinTopicData>(subscriber, topic_name).delegate();
+     } else if (topic_name == "DCPSSubscription") {
+-        builtin_reader = create_builtin_reader<dds::topic::SubscriptionBuiltinTopicData>(subscriber, topic_name).delegate();
++        builtin_reader = org::eclipse::cyclonedds::sub::create_builtin_reader<dds::topic::SubscriptionBuiltinTopicData>(subscriber, topic_name).delegate();
+     }
+ 
+     return builtin_reader;
+diff --git a/src/ddscxx/src/org/eclipse/cyclonedds/topic/BuiltinDataTopic.cpp b/src/ddscxx/src/org/eclipse/cyclonedds/topic/BuiltinDataTopic.cpp
+new file mode 100644
+index 0000000..03fe092
+--- /dev/null
++++ b/src/ddscxx/src/org/eclipse/cyclonedds/topic/BuiltinDataTopic.cpp
+@@ -0,0 +1,181 @@
++#include <cstdint>
++#include <vector>
++#include <string>
++
++#include "org/eclipse/cyclonedds/topic/TopicTraits.hpp"
++#include "org/eclipse/cyclonedds/topic/BuiltinDataTopic.hpp"
++
++#define unsupported_method_throw ISOCPP_DDSC_RESULT_CHECK_AND_THROW(DDS_RETCODE_NOT_ENABLED, "Unsupported method for builtin topics.")
++
++bool builtin_serdata_eqkey(
++  const ddsi_serdata*,
++  const ddsi_serdata*)
++{
++  unsupported_method_throw;
++  return false;
++}
++
++uint32_t builtin_serdata_size(
++  const ddsi_serdata*)
++{
++  unsupported_method_throw;
++  return 0;
++}
++
++ddsi_serdata *builtin_serdata_from_ser(
++  const ddsi_sertype*,
++  enum ddsi_serdata_kind,
++  const struct nn_rdata*,
++  size_t)
++{
++  unsupported_method_throw;
++  return nullptr;
++}
++
++ddsi_serdata *builtin_serdata_from_ser_iov(
++  const ddsi_sertype*,
++  enum ddsi_serdata_kind,
++  ddsrt_msg_iovlen_t,
++  const ddsrt_iovec_t*,
++  size_t)
++{
++  unsupported_method_throw;
++  return nullptr;
++
++}
++
++ddsi_serdata *builtin_serdata_from_keyhash(
++  const ddsi_sertype*,
++  const struct ddsi_keyhash*)
++{
++  unsupported_method_throw;
++  return nullptr;
++}
++
++ddsi_serdata *builtin_serdata_from_sample(
++  const ddsi_sertype*,
++  enum ddsi_serdata_kind,
++  const void*)
++{
++  unsupported_method_throw;
++  return nullptr;
++}
++
++void builtin_serdata_to_ser(
++  const ddsi_serdata*,
++  size_t,
++  size_t,
++  void*)
++{
++  unsupported_method_throw;
++}
++
++ddsi_serdata *builtin_serdata_to_ser_ref(
++  const ddsi_serdata*,
++  size_t,
++  size_t,
++  ddsrt_iovec_t*)
++{
++  unsupported_method_throw;
++  return nullptr;
++}
++
++void builtin_serdata_to_ser_unref(
++  ddsi_serdata*,
++  const ddsrt_iovec_t*)
++{
++  unsupported_method_throw;
++}
++
++bool builtin_serdata_to_sample(
++  const ddsi_serdata*,
++  void*,
++  void**,
++  void*)
++{
++  unsupported_method_throw;
++  return false;
++}
++
++ddsi_serdata *builtin_serdata_to_untyped(
++  const ddsi_serdata*)
++{
++  unsupported_method_throw;
++  return nullptr;
++}
++
++bool builtin_serdata_untyped_to_sample(
++  const ddsi_sertype*,
++  const ddsi_serdata*,
++  void*,
++  void**,
++  void*)
++{
++  unsupported_method_throw;
++  return false;
++}
++
++void builtin_serdata_get_keyhash(
++  const ddsi_serdata*,
++  struct ddsi_keyhash*,
++  bool)
++{
++  unsupported_method_throw;
++}
++
++#ifdef DDSCXX_HAS_SHM
++uint32_t builtin_serdata_iox_size(
++  const struct ddsi_serdata*)
++{
++  unsupported_method_throw;
++  return 0;
++}
++
++ddsi_serdata * builtin_serdata_from_iox_buffer(
++  const struct ddsi_sertype *,
++  enum ddsi_serdata_kind,
++  void *,
++  void *)
++{
++  unsupported_method_throw;
++  return nullptr;
++}
++#endif
++
++#ifdef _WIN32
++#define builtin_topic_ops_impl(builtin_topic_type)
++#else
++#define builtin_topic_ops_impl(builtin_topic_type)\
++builtin_topic_ops(builtin_topic_type)
++#endif
++
++#define builtin_topic_impl(builtin_topic_type)\
++template <> \
++dds::topic::builtin_topic_type* ddscxx_serdata<dds::topic::builtin_topic_type>::getT() {\
++  dds::topic::builtin_topic_type *t = m_t.load(std::memory_order_acquire);\
++  if (t == nullptr) {\
++    t = new dds::topic::builtin_topic_type();\
++    dds::topic::builtin_topic_type* exp = nullptr;\
++    if (!m_t.compare_exchange_strong(exp, t, std::memory_order_seq_cst)) {\
++      delete t;\
++      t = exp;\
++    }\
++  }\
++  return t;\
++}\
++template <> \
++bool sertype_serialize_into<dds::topic::builtin_topic_type>(const ddsi_sertype*, const void*, void*, size_t) {\
++  unsupported_method_throw;\
++  return false;\
++}\
++template <> \
++size_t sertype_get_serialized_size<dds::topic::builtin_topic_type>(const ddsi_sertype*, const void*) {\
++  unsupported_method_throw;\
++  return 0;\
++}\
++builtin_topic_ops_impl(builtin_topic_type)
++
++builtin_topic_impl(ParticipantBuiltinTopicData)
++builtin_topic_impl(TopicBuiltinTopicData)
++builtin_topic_impl(PublicationBuiltinTopicData)
++builtin_topic_impl(SubscriptionBuiltinTopicData)
+diff --git a/src/ddscxx/tests/BuiltinTopic.cpp b/src/ddscxx/tests/BuiltinTopic.cpp
+new file mode 100644
+index 0000000..4b07b72
+--- /dev/null
++++ b/src/ddscxx/tests/BuiltinTopic.cpp
+@@ -0,0 +1,401 @@
++/*
++ * Copyright(c) 2006 to 2021 ADLINK Technology Limited and others
++ *
++ * This program and the accompanying materials are made available under the
++ * terms of the Eclipse Public License v. 2.0 which is available at
++ * http://www.eclipse.org/legal/epl-2.0, or the Eclipse Distribution License
++ * v. 1.0 which is available at
++ * http://www.eclipse.org/org/documents/edl-v10.php.
++ *
++ * SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
++ */
++#include <gtest/gtest.h>
++#include <string>
++#include <vector>
++#include <chrono>
++#include <thread>
++#include <map>
++
++#include "dds/dds.hpp"
++#include "Space.hpp"
++
++using namespace org::eclipse::cyclonedds;
++
++/**
++ * Fixture for the BuiltinTopic tests
++ */
++class BuiltinTopic : public ::testing::Test
++{
++public:
++    const std::string topic_name;
++
++    static const std::string type_name;
++
++    static const std::string test_prefix;
++
++    static const std::map<std::string, std::string> builtins;
++
++    static const size_t max_samples = 16;
++
++    dds::domain::DomainParticipant participant;
++    dds::topic::Topic<Space::Type1> topic;
++
++    dds::pub::Publisher publisher;
++    dds::pub::DataWriter<Space::Type1> writer;
++
++    dds::sub::Subscriber subscriber;
++    dds::sub::DataReader<Space::Type1> reader;
++
++    const dds::sub::Subscriber builtinsubscriber;
++
++    BuiltinTopic():
++        topic_name(test_prefix +
++            testing::UnitTest::GetInstance()->current_test_info()->test_suite_name() +
++            "_" + testing::UnitTest::GetInstance()->current_test_info()->name()),
++        participant(domain::default_id()),
++        topic(participant, topic_name),
++        publisher(participant),
++        writer(publisher,topic),
++        subscriber(participant),
++        reader(subscriber,topic),
++        builtinsubscriber(dds::sub::builtin_subscriber(participant))
++    {
++    }
++
++    void GetPartReader(dds::sub::DataReader<dds::topic::ParticipantBuiltinTopicData> &participantreader)
++    {
++        const std::string name = "DCPSParticipant";
++        std::vector<dds::sub::DataReader<dds::topic::ParticipantBuiltinTopicData> > dpv;
++        size_t cnt = dds::sub::find<dds::sub::DataReader<dds::topic::ParticipantBuiltinTopicData>,
++            std::back_insert_iterator<std::vector<dds::sub::DataReader<dds::topic::ParticipantBuiltinTopicData> > > >
++                (builtinsubscriber, name,
++                 std::back_inserter<std::vector<dds::sub::DataReader<dds::topic::ParticipantBuiltinTopicData> > >(dpv));
++        ASSERT_GT(cnt,0);
++        participantreader = dpv[0];
++        ASSERT_NE(participantreader, dds::core::null);
++    }
++
++    void GetPubReader(dds::sub::DataReader<dds::topic::PublicationBuiltinTopicData> &publicationreader)
++    {
++        const std::string name = "DCPSPublication";
++        std::vector<dds::sub::DataReader<dds::topic::PublicationBuiltinTopicData> > dpv;
++        size_t cnt = dds::sub::find<dds::sub::DataReader<dds::topic::PublicationBuiltinTopicData>,
++            std::back_insert_iterator<std::vector<dds::sub::DataReader<dds::topic::PublicationBuiltinTopicData> > > >
++                (builtinsubscriber, name,
++                std::back_inserter<std::vector<dds::sub::DataReader<dds::topic::PublicationBuiltinTopicData> > >(dpv));
++        ASSERT_GT(cnt,0);
++        publicationreader = dpv[0];
++        ASSERT_NE(publicationreader, dds::core::null);
++    }
++
++    void GetSubReader(dds::sub::DataReader<dds::topic::SubscriptionBuiltinTopicData> &subscriptionreader)
++    {
++        const std::string name = "DCPSSubscription";
++        std::vector<dds::sub::DataReader<dds::topic::SubscriptionBuiltinTopicData> > dpv;
++        size_t cnt = dds::sub::find<dds::sub::DataReader<dds::topic::SubscriptionBuiltinTopicData>,
++            std::back_insert_iterator<std::vector<dds::sub::DataReader<dds::topic::SubscriptionBuiltinTopicData> > > >
++                (builtinsubscriber, name,
++                std::back_inserter<std::vector<dds::sub::DataReader<dds::topic::SubscriptionBuiltinTopicData> > >(dpv));
++        ASSERT_GT(cnt,0);
++        subscriptionreader = dpv[0];
++        ASSERT_NE(subscriptionreader, dds::core::null);
++    }
++
++    void GetTopReader(dds::sub::DataReader<dds::topic::TopicBuiltinTopicData> &topicreader)
++    {
++        const std::string name = "DCPSTopic";
++        std::vector<dds::sub::DataReader<dds::topic::TopicBuiltinTopicData> > dpv;
++
++        /** when topic discovery is not enabled, creating a reader for the builtin topic topic will fail in cyclonedds */
++        try {
++            size_t cnt = dds::sub::find<dds::sub::DataReader<dds::topic::TopicBuiltinTopicData>,
++                  std::back_insert_iterator<std::vector<dds::sub::DataReader<dds::topic::TopicBuiltinTopicData> > > >
++                      (builtinsubscriber, name,
++                      std::back_inserter<std::vector<dds::sub::DataReader<dds::topic::TopicBuiltinTopicData> > >(dpv));
++            #if defined(DDS_HAS_TOPIC_DISCOVERY)
++            ASSERT_GT(cnt,0);
++            topicreader = dpv[0];
++            ASSERT_NE(topicreader, dds::core::null);
++            #else
++            ASSERT_EQ(cnt,0);
++            topicreader = dds::core::null;
++            ASSERT_TRUE(false);
++            #endif
++        } catch (const dds::core::UnsupportedError& ex) {
++            #if defined(DDS_HAS_TOPIC_DISCOVERY)
++            ASSERT_FALSE(true);
++            #else
++            ASSERT_EQ(std::string(ex.what()).find("Error Unsupported - Could not create DataReader."), 0);
++            #endif
++        }
++    }
++
++    void SetUp()
++    {
++        while (writer.publication_matched_status().current_count() == 0) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(20));
++        }
++
++        ASSERT_NE(participant, dds::core::null);
++        ASSERT_NE(topic, dds::core::null);
++
++        ASSERT_NE(publisher, dds::core::null);
++        ASSERT_NE(writer, dds::core::null);
++
++        ASSERT_NE(subscriber, dds::core::null);
++        ASSERT_NE(reader, dds::core::null);
++
++        ASSERT_NE(builtinsubscriber, dds::core::null);
++    }
++
++    void TearDown()
++    {
++        /** setting the participant to null should clean up all its children (topic etc.) */
++        participant = dds::core::null;
++    }
++
++    template<typename H>
++    void validate_participants(const H &samples, size_t n_expect)
++    {
++        auto length = static_cast<size_t>(std::distance(samples.begin(), samples.end()));
++        if (n_expect) {
++            ASSERT_GE(length, n_expect);
++        } else {
++            ASSERT_EQ(length, 0);
++        }
++
++        for (const auto & sam:samples) {
++            auto info = sam.info();
++            ASSERT_TRUE(info.valid());
++        }
++    }
++
++    template<typename H>
++    void validate_topics(const H &samples, size_t n_expect)
++    {
++        auto length = static_cast<size_t>(std::distance(samples.begin(), samples.end()));
++        if (n_expect) {
++            ASSERT_GE(length, n_expect);
++        } else {
++            ASSERT_EQ(length, 0);
++        }
++
++        size_t seen = 0;
++        for (const auto & sam:samples) {
++            auto info = sam.info();
++            ASSERT_TRUE(info.valid());
++            auto data = sam.data();
++            //none of the builting topic should appear here
++            ASSERT_EQ(builtins.find(data.name()), builtins.end());
++
++            if (data.name() == topic_name) {
++                ASSERT_EQ(data.type_name(), type_name);
++                seen++;
++            }
++        }
++        ASSERT_GE(seen, n_expect);
++    }
++
++    template<typename H>
++    void validate_pubs(const H &samples, size_t n_expect)
++    {
++        auto length = static_cast<size_t>(std::distance(samples.begin(), samples.end()));
++        if (n_expect) {
++            ASSERT_GE(length, n_expect);
++        } else {
++            ASSERT_EQ(length, 0);
++        }
++
++        size_t topic_found = 0;
++        for (const auto & sam:samples) {
++            auto info = sam.info();
++            ASSERT_TRUE(info.valid());
++            auto data = sam.data();
++
++            if (data.topic_name() == topic_name) {
++                ASSERT_EQ(data.type_name(), type_name);
++                topic_found++;
++            }
++        }
++        ASSERT_GE(topic_found, n_expect);
++    }
++
++    template<typename H>
++    void validate_subs(const H &samples, size_t n_expect)
++    {
++        auto length = static_cast<size_t>(std::distance(samples.begin(), samples.end()));
++        if (n_expect) {
++            ASSERT_GE(length, n_expect);
++        } else {
++            ASSERT_EQ(length, 0);
++        }
++
++        size_t topic_found = 0, sub_found = 0;
++        for (const auto & sam:samples) {
++            auto info = sam.info();
++            ASSERT_TRUE(info.valid());
++            auto data = sam.data();
++
++            if (data.topic_name() == topic_name) {
++                ASSERT_EQ(data.type_name(), type_name);
++                topic_found++;
++            }
++
++            if (data.topic_name() == "DCPSSubscription") {
++                ASSERT_EQ(data.type_name(), "org::eclipse::cyclonedds::builtin::DCPSSubscription");
++                sub_found++;
++            }
++        }
++        ASSERT_GE(topic_found, n_expect);
++        ASSERT_GE(sub_found, n_expect);
++    }
++};
++
++const std::map<std::string, std::string> BuiltinTopic::builtins =
++    { {"DCPSPublication",   "org::eclipse::cyclonedds::builtin::DCPSPublication"},
++      {"DCPSSubscription",  "org::eclipse::cyclonedds::builtin::DCPSSubscription"},
++      {"DCPSTopic",         "org::eclipse::cyclonedds::builtin::DCPSTopic"},
++      {"DCPSParticipant",   "org::eclipse::cyclonedds::builtin::DCPSParticipant"} };
++
++const std::string BuiltinTopic::type_name = org::eclipse::cyclonedds::topic::TopicTraits<Space::Type1>::getTypeName();
++
++const std::string BuiltinTopic::test_prefix = "Builtin_test_";
++
++#define test_loaned_samples(TYPE, GFNCTN, VFNCTN)\
++dds::sub::DataReader<TYPE> reader(dds::core::null);\
++GFNCTN(reader);\
++auto samples = reader.read();\
++VFNCTN(samples, 1);\
++samples = reader.read();\
++VFNCTN(samples, 1);\
++samples = reader.take();\
++VFNCTN(samples, 1);\
++samples = reader.take();\
++VFNCTN(samples, 0);
++
++#define test_forward_iterators(TYPE, GFNCTN, VFNCTN)\
++dds::sub::DataReader<TYPE> reader(dds::core::null);\
++GFNCTN(reader);\
++{   std::vector<dds::sub::Sample<TYPE> > samples(max_samples);\
++    samples.resize(reader.read(samples.begin(), max_samples));\
++    VFNCTN(samples, 1);}\
++{   std::vector<dds::sub::Sample<TYPE> > samples(max_samples);\
++    samples.resize(reader.read(samples.begin(), max_samples));\
++    VFNCTN(samples, 1);}\
++{   std::vector<dds::sub::Sample<TYPE> > samples(max_samples);\
++    samples.resize(reader.take(samples.begin(), max_samples));\
++    VFNCTN(samples, 1);}\
++{   std::vector<dds::sub::Sample<TYPE> > samples(max_samples);\
++    samples.resize(reader.take(samples.begin(), max_samples));\
++    VFNCTN(samples, 0);}
++
++#define test_back_insert_iterators(TYPE, GFNCTN, VFNCTN)\
++dds::sub::DataReader<TYPE> reader(dds::core::null);\
++GFNCTN(reader);\
++{   std::vector<dds::sub::Sample<TYPE> > samples;\
++    std::back_insert_iterator<std::vector<dds::sub::Sample<TYPE> > > it(samples);\
++    samples.resize(reader.read(it));\
++    VFNCTN(samples, 1);}\
++{   std::vector<dds::sub::Sample<TYPE> > samples;\
++    std::back_insert_iterator<std::vector<dds::sub::Sample<TYPE> > > it(samples);\
++    samples.resize(reader.read(it));\
++    VFNCTN(samples, 1);}\
++{   std::vector<dds::sub::Sample<TYPE> > samples;\
++    std::back_insert_iterator<std::vector<dds::sub::Sample<TYPE> > > it(samples);\
++    samples.resize(reader.take(it));\
++    VFNCTN(samples, 1);}\
++{   std::vector<dds::sub::Sample<TYPE> > samples;\
++    std::back_insert_iterator<std::vector<dds::sub::Sample<TYPE> > > it(samples);\
++    samples.resize(reader.take(it));\
++    VFNCTN(samples, 0);}
++
++/**
++ * Testing builtin topic for participants
++ */
++TEST_F(BuiltinTopic, participant)
++{
++    test_loaned_samples(dds::topic::ParticipantBuiltinTopicData, GetPartReader, validate_participants);
++}
++
++TEST_F(BuiltinTopic, participant_forward_iterator)
++{
++    test_forward_iterators(dds::topic::ParticipantBuiltinTopicData, GetPartReader, validate_participants);
++}
++
++TEST_F(BuiltinTopic, participant_back_insert_iterator)
++{
++    test_back_insert_iterators(dds::topic::ParticipantBuiltinTopicData, GetPartReader, validate_participants);
++}
++
++/**
++ * Testing builtin topic for topics
++ */
++TEST_F(BuiltinTopic, topic)
++{
++    #if defined(DDS_HAS_TOPIC_DISCOVERY)
++    test_loaned_samples(dds::topic::TopicBuiltinTopicData, GetTopReader, validate_topics);
++    #else
++    dds::sub::DataReader<dds::topic::TopicBuiltinTopicData> topicreader(dds::core::null);
++    GetTopReader(topicreader);
++    #endif
++}
++
++TEST_F(BuiltinTopic, topic_forward_iterator)
++{
++    #if defined(DDS_HAS_TOPIC_DISCOVERY)
++    test_forward_iterators(dds::topic::TopicBuiltinTopicData, GetTopReader, validate_topics);
++    #else
++    dds::sub::DataReader<dds::topic::TopicBuiltinTopicData> topicreader(dds::core::null);
++    GetTopReader(topicreader);
++    #endif
++}
++
++TEST_F(BuiltinTopic, topic_back_insert_iterator)
++{
++    #if defined(DDS_HAS_TOPIC_DISCOVERY)
++    test_back_insert_iterators(dds::topic::TopicBuiltinTopicData, GetTopReader, validate_topics);
++    #else
++    dds::sub::DataReader<dds::topic::TopicBuiltinTopicData> topicreader(dds::core::null);
++    GetTopReader(topicreader);
++    #endif
++}
++
++/**
++ * Testing builtin topic for publication
++ */
++TEST_F(BuiltinTopic, publication)
++{
++    test_loaned_samples(dds::topic::PublicationBuiltinTopicData, GetPubReader, validate_pubs);
++}
++
++TEST_F(BuiltinTopic, publication_forward_iterator)
++{
++    test_forward_iterators(dds::topic::PublicationBuiltinTopicData, GetPubReader, validate_pubs);
++}
++
++TEST_F(BuiltinTopic, publication_back_insert_iterator)
++{
++    test_back_insert_iterators(dds::topic::PublicationBuiltinTopicData, GetPubReader, validate_pubs);
++}
++
++/**
++ * Testing builtin topic for subscription
++ */
++TEST_F(BuiltinTopic, subscription)
++{
++    test_loaned_samples(dds::topic::SubscriptionBuiltinTopicData, GetSubReader, validate_subs);
++}
++
++TEST_F(BuiltinTopic, subscription_forward_iterator)
++{
++    test_forward_iterators(dds::topic::SubscriptionBuiltinTopicData, GetSubReader, validate_subs);
++}
++
++TEST_F(BuiltinTopic, subscription_back_insert_iterator)
++{
++    test_back_insert_iterators(dds::topic::SubscriptionBuiltinTopicData, GetSubReader, validate_subs);
++}
++
++#undef test_loaned_samples
++#undef test_forward_iterators
++#undef test_back_insert_iterators
+diff --git a/src/ddscxx/tests/CMakeLists.txt b/src/ddscxx/tests/CMakeLists.txt
+index 96231a7..676cd0b 100644
+--- a/src/ddscxx/tests/CMakeLists.txt
++++ b/src/ddscxx/tests/CMakeLists.txt
+@@ -47,7 +47,8 @@ set(sources
+   WaitSet.cpp
+   Qos.cpp
+   Condition.cpp
+-  Util.cpp)
++  Util.cpp
++  BuiltinTopic.cpp)
+ 
+ if(ENABLE_SHM)
+   # Add shared memory tests
+diff --git a/src/ddscxx/tests/SharedMemory.cpp b/src/ddscxx/tests/SharedMemory.cpp
+index cd2af68..95c58bc 100644
+--- a/src/ddscxx/tests/SharedMemory.cpp
++++ b/src/ddscxx/tests/SharedMemory.cpp
+@@ -13,10 +13,16 @@
+ 
+ #include "dds/dds.hpp"
+ #include "dds/ddsrt/environ.h"
++#include "dds/ddsi/ddsi_shm_transport.h"
+ #include "iceoryx_posh/testing/roudi_gtest.hpp"
+ #include "HelloWorldData.hpp"
+ #include "Space.hpp"
+ #include "Serialization.hpp"
++#include "iceoryx_posh/popo/subscriber.hpp"
++#include "iceoryx_posh/popo/sample.hpp"
++#include "iceoryx_utils/cxx/optional.hpp"
++
++#include <random>
+ 
+ #define EXPECT_THROW_EXCEPTION(statement, error_msg) \
+   ASSERT_THROW(statement, dds::core::Exception); \
+@@ -28,16 +34,22 @@
+ 
+ namespace
+ {
++
++using IceoryxHeader = iceoryx_header;
++
+ template<class T>
+-void make_sample_(T & sample, const int32_t cnt)
++void make_sample_(T & sample, const int32_t cnt);
++
++template<>
++void make_sample_(Space::Type1 & sample, const int32_t cnt)
+ {
+-  (void) sample;
+-  (void) cnt;
+-  throw std::runtime_error("make_sample_ called on unsupported type");
++  sample.long_1(cnt);
++  sample.long_2(cnt + 1);
++  sample.long_3(cnt + 2);
+ }
+ 
+ template<>
+-void make_sample_(Space::Type1 & sample, const int32_t cnt)
++void make_sample_(Space::Type2 & sample, const int32_t cnt)
+ {
+   sample.long_1(cnt);
+   sample.long_2(cnt + 1);
+@@ -51,16 +63,54 @@ void make_sample_(HelloWorldData::Msg & sample, const int32_t cnt)
+   sample.message(std::to_string(cnt));
+ }
+ 
++char get_random_char()
++{
++  static std::mt19937 gen(std::random_device{}());
++  static std::uniform_int_distribution<> dist('a', 'z');
++  return static_cast<char>(dist(gen));
++}
++
+ template<>
+ void make_sample_(Bounded::Msg & sample, const int32_t cnt)
+ {
+-  sample.bounded_string(std::to_string(cnt));
+-  sample.boolean_sequence().reserve(255);
+-  std::fill(sample.boolean_sequence().begin(), sample.boolean_sequence().begin() + 255, true);
+-  sample.bounded_sequence().reserve(255);
+-  std::fill(sample.bounded_sequence().begin(), sample.bounded_sequence().begin() + 255, cnt);
++  // the sequence types are bounded to 255, so limit the capacity to 255
++  int32_t capacity = cnt * 10;
++  capacity = (capacity > 255) ? 255 : capacity;
++
++  sample.bounded_string().resize(static_cast<uint32_t>(capacity));
++  std::fill(sample.bounded_string().begin(),
++    sample.bounded_string().begin() + capacity, get_random_char());
++
++  sample.boolean_sequence().resize(static_cast<uint32_t>(capacity));
++  std::fill(sample.boolean_sequence().begin(), sample.boolean_sequence().begin() + capacity, true);
++
++  sample.bounded_sequence().resize(static_cast<uint32_t>(capacity));
++  std::fill(sample.bounded_sequence().begin(), sample.bounded_sequence().begin() + capacity, cnt);
+ }
++
++template<>
++void make_sample_(UnBounded::Msg & sample, const int32_t cnt)
++{
++  // the sequence types are unbounded, reserve the capacity to 100x of the count
++  int32_t capacity = cnt * 100;
++
++  sample.unbounded_string().resize(static_cast<uint32_t>(capacity));
++  std::fill(sample.unbounded_string().begin(),
++    sample.unbounded_string().begin() + capacity, get_random_char());
++
++  sample.unbounded_sequence_bool().resize(static_cast<uint32_t>(capacity));
++  std::fill(sample.unbounded_sequence_bool().begin(),
++    sample.unbounded_sequence_bool().begin() + capacity, true);
++
++  sample.unbounded_sequence_long().resize(static_cast<uint32_t>(capacity));
++  std::fill(sample.unbounded_sequence_long().begin(),
++    sample.unbounded_sequence_long().begin() + capacity, cnt);
++}
++
++constexpr bool MUST_USE_ICEORYX = true;
++constexpr bool DO_NOT_USE_ICEORYX = false;
+ }
++
+ /**
+  * Fixture for the shared memory tests with RouDi
+  */
+@@ -78,6 +128,9 @@ public:
+   dds::pub::DataWriter<T> writer;
+   dds::sub::cond::ReadCondition rc;
+   dds::core::cond::WaitSet waitset;
++  iox::cxx::optional<iox::popo::Subscriber<T, iceoryx_header_t>> iceoryx_subscriber;
++
++  static constexpr char TOPIC_NAME[] = "datareader_test_topic";
+ 
+   SharedMemoryTest()
+   : participant(dds::core::null),
+@@ -115,7 +168,7 @@ public:
+   {
+     if (this->topic == dds::core::null) {
+       this->CreateParticipant();
+-      this->topic = dds::topic::Topic<T>(this->participant, "datareader_test_topic");
++      this->topic = dds::topic::Topic<T>(this->participant, TOPIC_NAME);
+       ASSERT_NE(this->topic, dds::core::null);
+     }
+   }
+@@ -135,6 +188,11 @@ public:
+     if (this->reader == dds::core::null) {
+       this->reader = dds::sub::DataReader<T>(this->subscriber, this->topic, r_qos);
+       ASSERT_NE(this->reader, dds::core::null);
++
++      this->iceoryx_subscriber.emplace(
++          iox::capro::ServiceDescription{"DDS_CYCLONE", 
++               iox::capro::IdString_t(iox::cxx::TruncateToCapacity, org::eclipse::cyclonedds::topic::TopicTraits<TopicType>::getTypeName()), 
++               TOPIC_NAME});
+     }
+   }
+ 
+@@ -202,44 +260,73 @@ public:
+ 
+   void
+   CheckData(
+-    const dds::sub::LoanedSamples<T> & samples,
+-    const std::vector<T> & test_data,
+-    const dds::sub::status::DataState & test_state =
+-    dds::sub::status::DataState(dds::sub::status::SampleState::not_read(),
+-    dds::sub::status::ViewState::new_view(),
+-    dds::sub::status::InstanceState::alive()))
++    const bool must_use_iceoryx,
++    const dds::sub::LoanedSamples<T> & sample,
++    const T & test_data)
+   {
+-    unsigned long count = 0UL;
+-    ASSERT_EQ(samples.length(), test_data.size());
+-    typename dds::sub::LoanedSamples<T>::const_iterator it;
+-    for (it = samples.begin(); it != samples.end(); ++it, ++count) {
+-      const T & data = it->data();
+-      const dds::sub::SampleInfo & info = it->info();
+-      const dds::sub::status::DataState & state = info.state();
+-      ASSERT_EQ(data, test_data[count]);
+-      ASSERT_EQ(state.view_state(), test_state.view_state());
+-      ASSERT_EQ(state.sample_state(), test_state.sample_state());
+-      ASSERT_EQ(state.instance_state(), test_state.instance_state());
++    // we only have one sample
++    ASSERT_EQ(sample.length(), 1);
++    const T & data = sample.begin()->data();
++    const dds::sub::SampleInfo & info = sample.begin()->info();
++    const dds::sub::status::DataState & state = info.state();
++    ASSERT_EQ(data, test_data);
++    // the sample view state can either be new or not new (which has not been taken)
++    ASSERT_TRUE((state.view_state() == dds::sub::status::ViewState::new_view()) ||
++      (state.view_state() == dds::sub::status::ViewState::not_new_view()));
++    ASSERT_EQ(state.sample_state(), dds::sub::status::SampleState::not_read());
++    ASSERT_EQ(state.instance_state(), dds::sub::status::InstanceState::alive());
++
++    if (must_use_iceoryx) {
++      ASSERT_TRUE(iceoryx_subscriber->hasData());
++      auto result = iceoryx_subscriber->take();
++      ASSERT_FALSE(result.has_error());
++      // get the sample with the user header
++      auto & iox_sample = result.value();
++      // get the user header
++      auto user_header = iox_sample.getUserHeader();
++      // get the actual data
++      auto iceoryx_data = iox_sample.get();
++
++      // if the data in the chunk is of the serialized type
++      if (user_header.shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
++        // Since the data in iceoryx chunk is in the serialized form, take the
++        // sample and deserialize the data and then compare with the sent data
++        auto buf_ptr = reinterpret_cast<unsigned char *>(const_cast<T *>(iceoryx_data));
++        T msg;
++        deserialize_sample_from_buffer(buf_ptr, msg);
++        ASSERT_EQ(msg, test_data);
++      } else if (user_header.shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
++        // the chunk already has deserialized data and can be compared directly
++        ASSERT_EQ(*iceoryx_data, test_data);
++      } else {
++        throw std::runtime_error(
++                "the data state is not expected " + std::to_string(user_header.shm_data_state));
++      }
++    } else {
++      ASSERT_FALSE(iceoryx_subscriber->hasData());
+     }
+   }
+ 
+   void run_communication_test(
++    const bool must_use_iceoryx,
+     const dds::sub::qos::DataReaderQos & r_qos,
+     const dds::pub::qos::DataWriterQos & w_qos,
+     const int32_t num_samples)
+   {
+-    dds::sub::LoanedSamples<T> samples;
+-    std::vector<T> test_samples;
+-
+-    /* setup communication */
++    // setup communication
+     this->SetupCommunication(r_qos, w_qos);
+-    /* write data. */
+-    test_samples = this->WriteData(num_samples);
+-    /* wait for data */
+-    this->WaitForData();
+-    /* Check result by taking. */
+-    samples = this->reader.take();
+-    this->CheckData(samples, test_samples);
++    // write data
++    std::vector<T> test_samples = this->WriteData(num_samples);
++
++    // take the data and verify
++    for (int32_t i = 0; i < num_samples; i++) {
++      // wait for data
++      this->WaitForData();
++      // Take one sample at a time (to not introduce undesired flakiness in the test)
++      auto sample = this->reader.select().max_samples(1).take();
++      // verify the received data
++      this->CheckData(must_use_iceoryx, sample, test_samples[static_cast<size_t>(i)]);
++    }
+   }
+ 
+   void run_loan_support_api_test(const bool valid_r_shm_qos, const bool valid_w_shm_qos)
+@@ -265,7 +352,8 @@ public:
+  * Tests
+  */
+ 
+-using TestTypes = ::testing::Types<Space::Type1, HelloWorldData::Msg, Bounded::Msg>;
++using TestTypes = ::testing::Types<Space::Type1, Space::Type2, HelloWorldData::Msg,
++    Bounded::Msg, UnBounded::Msg>;
+ TYPED_TEST_SUITE(SharedMemoryTest, TestTypes, );
+ 
+ TYPED_TEST(SharedMemoryTest, writer_reader_valid_shm_qos)
+@@ -285,8 +373,8 @@ TYPED_TEST(SharedMemoryTest, writer_reader_valid_shm_qos)
+   constexpr bool valid_w_shm_qos = true;
+ 
+   // tests
+-  this->run_communication_test(r_qos, w_qos, 10);
+-  this->run_loan_support_api_test(valid_r_shm_qos, valid_w_shm_qos);
++  EXPECT_NO_THROW(this->run_communication_test(MUST_USE_ICEORYX, r_qos, w_qos, 10));
++  EXPECT_NO_THROW(this->run_loan_support_api_test(valid_r_shm_qos, valid_w_shm_qos));
+ }
+ 
+ TYPED_TEST(SharedMemoryTest, writer_reader_default_qos)
+@@ -297,8 +385,8 @@ TYPED_TEST(SharedMemoryTest, writer_reader_default_qos)
+   constexpr bool valid_shm_qos = true;
+ 
+   // test communication
+-  this->run_communication_test(r_qos, w_qos, 1);
+-  this->run_loan_support_api_test(valid_shm_qos, valid_shm_qos);
++  EXPECT_NO_THROW(this->run_communication_test(MUST_USE_ICEORYX, r_qos, w_qos, 1));
++  EXPECT_NO_THROW(this->run_loan_support_api_test(valid_shm_qos, valid_shm_qos));
+ }
+ 
+ TYPED_TEST(SharedMemoryTest, writer_valid_shm_qos)
+@@ -320,8 +408,8 @@ TYPED_TEST(SharedMemoryTest, writer_valid_shm_qos)
+   constexpr bool valid_w_shm_qos = true;
+ 
+   // tests
+-  this->run_communication_test(r_qos, w_qos, 10);
+-  this->run_loan_support_api_test(valid_r_shm_qos, valid_w_shm_qos);
++  EXPECT_NO_THROW(this->run_communication_test(MUST_USE_ICEORYX, r_qos, w_qos, 10));
++  EXPECT_NO_THROW(this->run_loan_support_api_test(valid_r_shm_qos, valid_w_shm_qos));
+ }
+ 
+ TYPED_TEST(SharedMemoryTest, reader_valid_shm_qos)
+@@ -341,8 +429,8 @@ TYPED_TEST(SharedMemoryTest, reader_valid_shm_qos)
+   constexpr bool valid_w_shm_qos = false;
+ 
+   // tests
+-  this->run_communication_test(r_qos, w_qos, 10);
+-  this->run_loan_support_api_test(valid_r_shm_qos, valid_w_shm_qos);
++  EXPECT_NO_THROW(this->run_communication_test(DO_NOT_USE_ICEORYX, r_qos, w_qos, 10));
++  EXPECT_NO_THROW(this->run_loan_support_api_test(valid_r_shm_qos, valid_w_shm_qos));
+ }
+ 
+ TYPED_TEST(SharedMemoryTest, invalid_shm_qos)
+@@ -361,8 +449,8 @@ TYPED_TEST(SharedMemoryTest, invalid_shm_qos)
+   w_qos << dds::core::policy::History::KeepLast(10U);
+   constexpr bool valid_w_shm_qos = false;
+ 
+-  this->run_communication_test(r_qos, w_qos, 10);
+-  this->run_loan_support_api_test(valid_r_shm_qos, valid_w_shm_qos);
++  EXPECT_NO_THROW(this->run_communication_test(DO_NOT_USE_ICEORYX, r_qos, w_qos, 10));
++  EXPECT_NO_THROW(this->run_loan_support_api_test(valid_r_shm_qos, valid_w_shm_qos));
+ }
+ 
+ TYPED_TEST(SharedMemoryTest, loan_sample)
+@@ -379,7 +467,7 @@ TYPED_TEST(SharedMemoryTest, loan_sample)
+ 
+   this->SetupCommunication(r_qos, w_qos);
+   using DDSType = typename TestFixture::TopicType;
+-  // request loan
++  // request loan (supported only for fixed-size self-contained types)
+   if (org::eclipse::cyclonedds::topic::TopicTraits<DDSType>::isSelfContained()) {
+     try {
+       auto & loaned_sample = this->writer.delegate()->loan_sample();
+diff --git a/src/ddscxx/tests/Subscriber.cpp b/src/ddscxx/tests/Subscriber.cpp
+index 5d0a8ee..9175ca0 100644
+--- a/src/ddscxx/tests/Subscriber.cpp
++++ b/src/ddscxx/tests/Subscriber.cpp
+@@ -230,7 +230,5 @@ TEST_F(Subscriber, use_after_deletion)
+ TEST_F(Subscriber, builtin)
+ {
+     this->CreateSubscriber();
+-    ASSERT_THROW({
+-        dds::sub::builtin_subscriber(this->participant);
+-    }, dds::core::UnsupportedError);
++    ASSERT_NE(dds::sub::builtin_subscriber(this->participant), dds::core::null);
+ }
+diff --git a/src/ddscxx/tests/WaitSet.cpp b/src/ddscxx/tests/WaitSet.cpp
+index 3640f2a..bffca7f 100644
+--- a/src/ddscxx/tests/WaitSet.cpp
++++ b/src/ddscxx/tests/WaitSet.cpp
+@@ -872,3 +872,60 @@ TEST_F(WaitSet, DISABLED_attach_detach_multiple_during_wait)
+ 
+     ddsrt_thread_join(threadId, NULL);
+ }
++
++/**
++ * Check that the status conditions are triggered correctly
++ *
++ * The test checks for trigger of status condition in the following sequence
++ *     1. Status Condition is create and initialized with StatusMask::none()
++ *     2. Specific status mask is enabled on status condition (requested_incompatible_qos())
++ *     3. Status condition is attached to the waitset
++ *     4. The test checks for the trigger for an event which happend before enabling the status mask
++ */
++TEST_F(WaitSet, status_condition_trigger)
++{
++  using SampleType = Space::Type2;
++  auto topic = dds::topic::Topic<SampleType>(this->participant, "space_type2");
++  ASSERT_NE(topic, dds::core::null);
++
++  // Create datawriter
++  dds::pub::qos::DataWriterQos dw_qos{};
++  dw_qos.policy<dds::core::policy::Durability>().kind(
++    dds::core::policy::DurabilityKind::VOLATILE);
++  dds::pub::DataWriter<SampleType> dw(this->publisher, topic, dw_qos);
++
++  // Create datareader
++  dds::sub::qos::DataReaderQos dr_qos{};
++  dr_qos.policy<dds::core::policy::Durability>().kind(
++    dds::core::policy::DurabilityKind::TRANSIENT_LOCAL);
++  dds::sub::DataReader<SampleType> dr(this->subscriber, topic, dr_qos);
++
++  // status condition on writer for offered incompatible QoS
++  dds::core::cond::StatusCondition sc_w(dw);
++  sc_w.enabled_statuses(dds::core::status::StatusMask::offered_incompatible_qos());
++
++  // status condition on reader
++  dds::core::cond::StatusCondition sc_r(dr);
++  // reset the status mask for the status condition
++  sc_r.enabled_statuses(dds::core::status::StatusMask::none());
++  // enable the status mask for requested incompatible QoS
++  sc_r.enabled_statuses(dds::core::status::StatusMask::requested_incompatible_qos());
++
++
++  // create a waitset and attach the conditions
++  dds::core::cond::WaitSet ws{};
++  ws.attach_condition(sc_w);  // write status condition
++  ws.attach_condition(sc_r);  // read status condition
++
++  auto attached_conditions = ws.conditions();
++  // wait for the events
++  auto triggered_conditions = ws.wait(dds::core::Duration{3, 0});
++
++  // both conditions (requested/offered incompatible QoS) should be triggered
++  EXPECT_EQ(triggered_conditions.size(), 2);
++  EXPECT_EQ(triggered_conditions[0]->get_ddsc_entity(), sc_w->get_ddsc_entity());
++  EXPECT_EQ(triggered_conditions[1]->get_ddsc_entity(), sc_r->get_ddsc_entity());
++
++  EXPECT_EQ(dr.requested_incompatible_qos_status().total_count(), 1);
++  EXPECT_EQ(dw.offered_incompatible_qos_status().total_count(), 1);
++}
+\ No newline at end of file
+diff --git a/src/ddscxx/tests/data/Serialization.idl b/src/ddscxx/tests/data/Serialization.idl
+index fb5cec0..db525f7 100644
+--- a/src/ddscxx/tests/data/Serialization.idl
++++ b/src/ddscxx/tests/data/Serialization.idl
+@@ -10,6 +10,18 @@ module Bounded
+ 
+ };
+ 
++module UnBounded
++{
++
++  struct Msg
++  {
++    string unbounded_string;
++    sequence<long> unbounded_sequence_long;
++    sequence<boolean> unbounded_sequence_bool;
++  };
++
++};
++
+ module Endianness
+ {
+ 
