@@ -111,10 +111,6 @@ class cycloneddsCxxConan(ConanFile):
                 "For option 'with_shm=True', " +
                 "options 'cyclonedds:with_shm' must be True too")
 
-        if self.version == '0.8.2-builtintopics' and self.options.with_shm:
-            raise ConanInvalidConfiguration(
-                "'with_shm=True' is not supported for this version")
-
     def build(self):
         cmake = self._configure_cmake()
         cmake.build()

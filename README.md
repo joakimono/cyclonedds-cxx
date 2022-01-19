@@ -82,7 +82,7 @@ CMake.  One workaround for this is to provide `CMAKE_PREFIX_PATH` using option
 `iceoryx_posh_testing`, i.e. specifying the path to the library cmake config scripts (or
 by installing iceoryx on a default search path).
 
-Builtin topic support is not included in 0.8.2, but there is a cherry-picked variant
-`0.8.2-builtintopics`, using work referenced in
+Builtin topic support is not included by default, but there is a cherry-picked variant
+`0.9.0a1-builtintopics`, using work referenced in
 [cyclonedds-cxx#135](https://github.com/eclipse-cyclonedds/cyclonedds-cxx/pull/135). Note
-that this requires `with_shm=False` for now.
+that it seems not to work as intended yet.

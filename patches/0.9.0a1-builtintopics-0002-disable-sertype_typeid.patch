@@ -1,0 +1,13 @@
+diff --git a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
+index 4bc59e3..8ce9cb0 100644
+--- a/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
++++ b/src/ddscxx/include/org/eclipse/cyclonedds/topic/datatopic.hpp
+@@ -832,7 +832,7 @@ const ddsi_sertype_ops ddscxx_sertype<T>::ddscxx_sertype_ops = {
+   sertype_free_samples<T>,
+   sertype_equal<T>,
+   sertype_hash<T>,
+-  sertype_typeid<T>,
++  nullptr, // sertype_typeid<T>,
+   nullptr, // serialized_size
+   nullptr, // serialize
+   nullptr, // deserialize

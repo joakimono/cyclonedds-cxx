@@ -4,17 +4,25 @@ sources:
     sha256: 3f666989c06df225e9e86845cfd2c9345d46111543c1743eb4ab3ec1191e6770
     url:
       - https://github.com/eclipse-cyclonedds/cyclonedds-cxx/archive/refs/tags/0.8.2.tar.gz
-  0.8.2-builtintopics:
-    sha256: 3f666989c06df225e9e86845cfd2c9345d46111543c1743eb4ab3ec1191e6770
+  0.9.0a1:
+    sha256: 68e474148892f870c6456012ae935b53112b0810d3260ddc6c4ce9da9dc1b366
     url:
-      - https://github.com/eclipse-cyclonedds/cyclonedds-cxx/archive/refs/tags/0.8.2.tar.gz
+      - https://github.com/eclipse-cyclonedds/cyclonedds-cxx/archive/refs/tags/0.9.0a1.tar.gz
+  0.9.0a1-builtintopics:
+    sha256: 68e474148892f870c6456012ae935b53112b0810d3260ddc6c4ce9da9dc1b366
+    url:
+      - https://github.com/eclipse-cyclonedds/cyclonedds-cxx/archive/refs/tags/0.9.0a1.tar.gz
 dependencies:
   0.8.2:
     cyclonedds: "0.8.2@sintef/stable"
     gtest: "[~1.10.0]"  # GTest 1.11.0 fails: https://github.com/google/googletest/issues/3384
     doxygen: "[~1.9.2]"
-  0.8.2-builtintopics:
-    cyclonedds: "0.8.2@sintef/stable"
+  0.9.0a1:
+    cyclonedds: "0.9.0a1@sintef/stable"
+    gtest: "[~1.10.0]"
+    doxygen: "[~1.9.2]"
+  0.9.0a1-builtintopics:
+    cyclonedds: "0.9.0a1@sintef/stable"
     gtest: "[~1.10.0]"
     doxygen: "[~1.9.2]"
 patches:
@@ -25,12 +33,23 @@ patches:
       patch_file: patches/0.8.2-0002-TypeKind_defType.patch
     - base_path: source_subfolder
       patch_file: patches/0.8.2-0003-datatopic-limits.patch
-  0.8.2-builtintopics:
+  0.9.0a1:
     - base_path: source_subfolder
       patch_file: patches/0.8.2-0001-conanization.patch
     - base_path: source_subfolder
       patch_file: patches/0.8.2-0002-TypeKind_defType.patch
     - base_path: source_subfolder
-      patch_file: patches/0.8.2-builtintopics-0001-builtin-topics-support.patch
+      patch_file: patches/0.8.2-0003-datatopic-limits.patch
+  0.9.0a1-builtintopics:
+    - base_path: source_subfolder
+      patch_file: patches/0.8.2-0001-conanization.patch
+    - base_path: source_subfolder
+      patch_file: patches/0.8.2-0002-TypeKind_defType.patch
+    - base_path: source_subfolder
+      patch_file: patches/0.9.0a1-builtintopics-0001-builtin-topics-support.patch
+#    - base_path: source_subfolder
+#      patch_file: patches/0.9.0a1-builtintopics-0002-disable-sertype_typeid.patch
     - base_path: source_subfolder
       patch_file: patches/0.8.2-0003-datatopic-limits.patch
+    - base_path: source_subfolder
+      patch_file: patches/0.9.0a1-builtintopics-0003-TBuiltinTopicKeyImpl.patch

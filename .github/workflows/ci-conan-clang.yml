@@ -21,7 +21,7 @@ jobs:
         compiler_version: [9, 10, 11]
         build_type: [Debug, Release]
         os: [ubuntu-20.04]
-        version: [0.8.2]
+        version: [0.8.2, 0.9.0a1]
     container:
       image: conanio/clang${{ matrix.compiler_version }}
       options: -u 0

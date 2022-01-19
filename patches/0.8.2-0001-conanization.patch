@@ -61,7 +61,7 @@ index 5fb82e8..e3fbc49 100644
 \ No newline at end of file
 +include("${CMAKE_CURRENT_LIST_DIR}/idlcxx/Generate.cmake")
 diff --git a/src/ddscxx/tests/CMakeLists.txt b/src/ddscxx/tests/CMakeLists.txt
-index 96231a7..9e9cb23 100644
+index 96231a7..acbf23c 100644
 --- a/src/ddscxx/tests/CMakeLists.txt
 +++ b/src/ddscxx/tests/CMakeLists.txt
 @@ -18,7 +18,7 @@ configure_file(
@@ -73,12 +73,11 @@ index 96231a7..9e9cb23 100644
    find_package(iceoryx_posh_roudi_environment REQUIRED)
  endif()
  
-@@ -99,7 +99,17 @@ else()
+@@ -99,7 +99,16 @@ else()
    set(var "LD_LIBRARY_PATH")
  endif()
  
 -get_target_property(cyclonedds_lib CycloneDDS::ddsc LOCATION)
-+# AGAIN!
 +if(CYCLONEDDS_MODULE)
 +  get_target_property(_ddslibdir CycloneDDS::ddsc INTERFACE_LINK_DIRECTORIES)
 +  if(WIN32)
@@ -93,10 +92,19 @@ index 96231a7..9e9cb23 100644
  get_target_property(gtest_main_lib GTest::Main IMPORTED_LOCATION)
  if(ENABLE_SHM)
 diff --git a/src/idlcxx/Generate.cmake b/src/idlcxx/Generate.cmake
-index e64b22e..e7e41e6 100644
+index e64b22e..a023d8f 100644
 --- a/src/idlcxx/Generate.cmake
 +++ b/src/idlcxx/Generate.cmake
-@@ -49,15 +49,40 @@ function(IDLCXX_GENERATE)
+@@ -11,7 +11,7 @@
+ #
+ function(IDLCXX_GENERATE)
+   set(one_value_keywords TARGET)
+-  set(multi_value_keywords FILES FEATURES)
++  set(multi_value_keywords FILES FEATURES DIRECTORY)
+   cmake_parse_arguments(
+     IDLCXX "" "${one_value_keywords}" "${multi_value_keywords}" "" ${ARGN})
+ 
+@@ -49,20 +49,60 @@ function(IDLCXX_GENERATE)
      list(APPEND _files "${_path}")
    endforeach()
  
@@ -125,18 +133,41 @@ index e64b22e..e7e41e6 100644
 +    set(_idlcxx_depends CycloneDDS-CXX::idlcxx)
 +  endif()
 +
++  add_custom_target("${_target}_folder")
++    add_custom_command(TARGET "${_target}_folder"
++      COMMENT "Create output directory ${IDLCXX_DIRECTORY}"
++      COMMAND  ${CMAKE_COMMAND}
++      ARGS     -E make_directory ${_dir}/${IDLCXX_DIRECTORY}
++      WORKING_DIRECTORY ${_dir}
++      )
++
    foreach(_file ${_files})
      get_filename_component(_name ${_file} NAME_WE)
-     set(_header "${_dir}/${_name}.hpp")
+-    set(_header "${_dir}/${_name}.hpp")
++    set(_header "${_dir}/${IDLCXX_DIRECTORY}/${_name}.hpp")
      list(APPEND _headers "${_header}")
      add_custom_command(
        OUTPUT   "${_header}"
 -      COMMAND  CycloneDDS::idlc
 -      ARGS     -l $<TARGET_FILE:CycloneDDS-CXX::idlcxx> ${IDLCXX_ARGS} ${_file}
 -      DEPENDS  ${_files} CycloneDDS::idlc CycloneDDS-CXX::idlcxx)
++      COMMENT "Generate header ${_name}.hpp from IDL"
 +      COMMAND  ${_idlc_executable}
 +      ARGS     -l ${_idlcxx} ${IDLCXX_ARGS} ${_file}
-+      DEPENDS  ${_files} ${_idlc_depends} ${_idlcxx_depends})
++      DEPENDS  ${_files} ${_idlc_depends} ${_idlcxx_depends} ${_target}_folder
++      WORKING_DIRECTORY ${_dir}/${IDLCXX_DIRECTORY})
    endforeach()
  
-   add_custom_target("${_target}_generate" DEPENDS ${_headers})
+-  add_custom_target("${_target}_generate" DEPENDS ${_headers})
+   add_library(${_target} INTERFACE)
++  add_custom_target("${_target}_generate" DEPENDS ${_headers})
+   target_sources(${_target} INTERFACE ${_headers})
+-  target_include_directories(${_target} INTERFACE "${_dir}")
++  target_include_directories(${_target} INTERFACE
++    "$<BUILD_INTERFACE:${_dir}>"
++    "$<INSTALL_INTERFACE:${IDLCXX_DIRECTORY}>"
++    )
+   add_dependencies(${_target} "${_target}_generate")
++
++
+ endfunction()

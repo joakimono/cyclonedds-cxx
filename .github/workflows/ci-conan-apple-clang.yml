@@ -21,7 +21,7 @@ jobs:
         compiler_version: ['13.0']
         build_type: [Debug, Release]
         os: [macos-11]
-        version: [0.8.2]
+        version: [0.8.2, 0.9.0a1]
     steps:
       - uses: actions/checkout@v2
       - name: Install prerequisites
