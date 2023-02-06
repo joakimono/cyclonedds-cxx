@@ -21,6 +21,11 @@ class cycloneddsCxxConan(ConanFile):
     options = {
         "shared": [True, False],
         "with_shm": [True, False],
+        "with_ddslib": [True, False],
+        "with_idllib": [True, False],
+        "with_legacy": [True, False],
+        "with_type_discovery": [True, False],
+        "with_topic_discovery": [True, False],
         "with_doc": [True, False],
         "with_examples": [True, False],
         "with_tests": [True, False],
@@ -34,6 +39,11 @@ class cycloneddsCxxConan(ConanFile):
     default_options = {
         "shared": True,
         "with_shm": True,
+        "with_ddslib": True,
+        "with_idllib": True,
+        "with_legacy": False,
+        "with_type_discovery": True,
+        "with_topic_discovery": True,
         "with_doc": False,
         "with_examples": False,
         "with_tests": False,
@@ -55,6 +65,8 @@ class cycloneddsCxxConan(ConanFile):
     def requirements(self):
         _deps = self.conan_data["dependencies"][self.version]
         self.requires("cyclonedds/{}".format(_deps["cyclonedds"]))
+        if self.options.get_safe("with_legacy", False):
+            self.requires("boost/{}".format(_deps["boost"]))
 
     def build_requirements(self):
         _deps = self.conan_data["dependencies"][self.version]
@@ -63,8 +75,22 @@ class cycloneddsCxxConan(ConanFile):
         if self.options.with_tests:
             self.build_requires("gtest/{}".format(_deps["gtest"]))
 
+    def config_options(self):
+        if tools.Version(self.version) < "0.11.0":
+            del self.options.with_ddslib
+        if tools.Version(self.version) < "0.10.2":
+            del self.options.with_idllib
+            del self.options.with_legacy
+            del self.options.with_type_discovery
+            del self.options.with_topic_discovery
+
     def configure(self):
         self.options["cyclonedds"].with_shm = self.options.with_shm
+        if tools.Version(self.version) >= "0.10.2":
+            self.options["cyclonedds"].with_type_discovery = \
+                self.options.with_type_discovery
+            self.options["cyclonedds"].with_topic_discovery = \
+                self.options.with_topic_discovery
 
     def source(self):
         tools.get(**self.conan_data["sources"][self.version],
@@ -81,6 +107,11 @@ class cycloneddsCxxConan(ConanFile):
 
             _defs["CMAKE_BUILD_TYPE"] = self.settings.build_type
             _defs["ENABLE_SHM"] = self.options.with_shm
+            if tools.Version(self.version) >= "0.10.2":
+                _defs["ENABLE_LEGACY"] = self.options.with_legacy
+                _defs["ENABLE_TYPE_DISCOVERY"] = self.options.with_type_discovery
+                _defs["ENABLE_TOPIC_DISCOVERY"] = self.options.with_topic_discovery
+
             _defs["BUILD_DOCS"] = self.options.with_doc
             _defs["BUILD_EXAMPLES"] = self.options.with_examples
             _defs["BUILD_TESTING"] = self.options.with_tests
@@ -105,7 +136,10 @@ class cycloneddsCxxConan(ConanFile):
         return self._cmake
 
     def validate(self):
-        tools.check_min_cppstd(self, "17")
+        if self.options.get_safe("with_legacy", False):
+            tools.check_min_cppstd(self, "11")
+        else:
+            tools.check_min_cppstd(self, "17")
         if self.options.with_shm and not self.options["cyclonedds"].with_shm:
             raise ConanInvalidConfiguration(
                 "For option 'with_shm=True', " +
@@ -146,23 +180,32 @@ class cycloneddsCxxConan(ConanFile):
             libcxx = tools.stdcpp_library(self)
             return [libcxx] if libcxx and not self.options.shared else []
 
-        return {
-            "ddscxx": {
+        def defs():
+            return ["LEGACY_CXX"] if self.options.get_safe("with_legacy", False) else []
+
+        _comps = dict()
+
+        if self.options.get_safe("with_ddslib", True):
+            _comps["ddscxx"] = {
                 "target": "CycloneDDS::ddscxx",
                 "type": "library",
                 "lib_names": ['ddscxx'],
                 "system_libs": pthread() + rt() + dl(),
                 "requires": cyclonedds_ddsc(),
+                "defines": defs(),
                 "includedirs": ["include/ddscxx"],
-            },
-            "idlcxx": {
+            }
+
+        if self.options.get_safe("with_idllib", True):
+            _comps["idlcxx"] = {
                 "target": "CycloneDDS::idlcxx",
                 "type": "library",
                 "lib_names": ['cycloneddsidlcxx'],
                 "system_libs": pthread() + libcxx(),
                 "requires": cyclonedds_idl(),
             }
-        }
+
+        return _comps
 
     @property
     def _module_subfolder(self):

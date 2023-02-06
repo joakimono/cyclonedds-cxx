@@ -1,0 +1,141 @@
+From 4074ac69d0c71c7db75eba1d9729b8881f7546f8 Mon Sep 17 00:00:00 2001
+From: Joakim Haugen <joakim.haugen@sintef.no>
+Date: Mon, 6 Feb 2023 15:25:49 +0100
+Subject: [PATCH 3/3] Conanisation
+
+---
+ CMakeLists.txt                  | 44 +++++++++++++++++++++++++++++----
+ PackageConfig.cmake.in          |  2 +-
+ src/ddscxx/tests/CMakeLists.txt | 13 ++++++++--
+ 3 files changed, 51 insertions(+), 8 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0b7f8cd..cee3eb4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -196,6 +196,9 @@ option(BUILD_EXAMPLES "Build examples." OFF)
+ # c++11 seems like a good tradeoff between the old and the new world
+ option(ENABLE_LEGACY "Legacy c++11 compatibility." OFF)
+ set(cyclonedds_cpp_std_to_use 17)
++
++include(${CMAKE_BINARY_DIR}/conan_paths.cmake)
++
+ if(ENABLE_LEGACY)
+   set(cyclonedds_cpp_std_to_use 11)
+   set(DDSCXX_USE_BOOST "1")
+@@ -240,7 +243,20 @@ find_package(CycloneDDS REQUIRED)
+ # memory being compiled into Cyclone DDS and iceoryx_binding_c being available
+ # If Cyclone DDS is compiled with support for shared memory, Cyclone DDS C++
+ # must be compiled with shared memory too and vice versa.
+-get_target_property(cyclonedds_has_shm CycloneDDS::ddsc SHM_SUPPORT_IS_AVAILABLE)
++if(CYCLONEDDS_MODULE)  # Using conan-generated find module
++  get_target_property(cyclone_defs CycloneDDS::ddsc INTERFACE_COMPILE_DEFINITIONS)
++endif()
++
++if(CYCLONEDDS_MODULE)  # Using conan-generated find module
++  list(FIND cyclone_defs "SHM_SUPPORT_IS_AVAILABLE" _feature_idx)
++  if(_feature_idx GREATER -1)
++    set(cyclonedds_has_shm 1)
++  else()
++    set(cyclonedds_has_shm 0)
++  endif()
++else()
++  get_target_property(cyclonedds_has_shm CycloneDDS::ddsc SHM_SUPPORT_IS_AVAILABLE)
++endif()
+ mark_as_advanced(cyclonedds_has_shm)
+ 
+ option(ENABLE_SHM "Enable shared memory support" ${cyclonedds_has_shm})
+@@ -248,16 +264,25 @@ if(ENABLE_SHM)
+   if(NOT cyclonedds_has_shm)
+     message(FATAL_ERROR "Cyclone DDS is NOT compiled with support for shared memory")
+   else()
+-    find_package(iceoryx_binding_c REQUIRED)
++    find_package(iceoryx REQUIRED)
+   endif()
+-  message(STATUS "Found iceoryx_binding_c: (found version \"${iceoryx_binding_c_VERSION}\")")
++  message(STATUS "Found iceoryx_binding_c: (found version \"${iceoryx_VERSION}\")")
+   set(ENABLE_SHM ON)
+   set(DDSCXX_HAS_SHM "1")
+ elseif(cyclonedds_has_shm)
+   message(FATAL_ERROR "Cyclone DDS is compiled with support for shared memory")
+ endif()
+ 
+-get_target_property(cyclonedds_has_type_discovery CycloneDDS::ddsc TYPE_DISCOVERY_IS_AVAILABLE)
++if(CYCLONEDDS_MODULE)  # Using conan-generated find module
++  list(FIND cyclone_defs "TYPE_DISCOVERY_IS_AVAILABLE" _feature_idx)
++  if(_feature_idx GREATER -1)
++    set(cyclonedds_has_type_discovery 1)
++  else()
++    set(cyclonedds_has_type_discovery 0)
++  endif()
++else()
++  get_target_property(cyclonedds_has_type_discovery CycloneDDS::ddsc TYPE_DISCOVERY_IS_AVAILABLE)
++endif()
+ mark_as_advanced(cyclonedds_has_type_discovery)
+ option(ENABLE_TYPE_DISCOVERY "Enable Type Discovery support" ${cyclonedds_has_type_discovery})
+ if(ENABLE_TYPE_DISCOVERY)
+@@ -268,7 +293,16 @@ if(ENABLE_TYPE_DISCOVERY)
+   set(DDSCXX_HAS_TYPE_DISCOVERY "1")
+ endif()
+ 
+-get_target_property(cyclonedds_has_topic_discovery CycloneDDS::ddsc TOPIC_DISCOVERY_IS_AVAILABLE)
++if(CYCLONEDDS_MODULE)  # Using conan-generated find module
++  list(FIND cyclone_defs "TOPIC_DISCOVERY_IS_AVAILABLE" _feature_idx)
++  if(_feature_idx GREATER -1)
++    set(cyclonedds_has_topic_discovery 1)
++  else()
++    set(cyclonedds_has_topic_discovery 0)
++  endif()
++else()
++  get_target_property(cyclonedds_has_topic_discovery CycloneDDS::ddsc TOPIC_DISCOVERY_IS_AVAILABLE)
++endif()
+ mark_as_advanced(cyclonedds_has_topic_discovery)
+ option(ENABLE_TOPIC_DISCOVERY "Enable Topic Discovery support" ${cyclonedds_has_topic_discovery})
+ if(ENABLE_TOPIC_DISCOVERY)
+diff --git a/PackageConfig.cmake.in b/PackageConfig.cmake.in
+index 54b37ed..6a2ba4e 100644
+--- a/PackageConfig.cmake.in
++++ b/PackageConfig.cmake.in
+@@ -15,7 +15,7 @@ find_package(CycloneDDS REQUIRED)
+ 
+ if(@ENABLE_SHM@)
+   include(CMakeFindDependencyMacro)
+-  find_dependency(iceoryx_binding_c)
++  find_dependency(iceoryx)
+ endif()
+ 
+ if(@ENABLE_LEGACY@)
+diff --git a/src/ddscxx/tests/CMakeLists.txt b/src/ddscxx/tests/CMakeLists.txt
+index de39ee8..c5cdc43 100644
+--- a/src/ddscxx/tests/CMakeLists.txt
++++ b/src/ddscxx/tests/CMakeLists.txt
+@@ -31,7 +31,7 @@ configure_file(
+ 
+ if(ENABLE_SHM)
+   # Packages required packages for SHM tests
+-  find_package(iceoryx_posh REQUIRED)
++  find_package(iceoryx REQUIRED)
+   find_package(iceoryx_posh_testing REQUIRED)
+ endif()
+ 
+@@ -123,7 +123,16 @@ else()
+   set(var "LD_LIBRARY_PATH")
+ endif()
+ 
+-get_target_property(cyclonedds_lib CycloneDDS::ddsc LOCATION)
++if(CYCLONEDDS_MODULE)
++  get_target_property(_ddslibdir CycloneDDS::ddsc INTERFACE_LINK_DIRECTORIES)
++  if(WIN32)
++    get_filename_component(cyclonedds_lib "${_ddslibdir}/../bin/ddsc.dll" ABSOLUTE)
++  else()
++    find_library(cyclonedds_lib ddsc ${_ddslibdir} NO_DEFAULT_PATH)
++  endif()
++else()
++    get_target_property(cyclonedds_lib CycloneDDS::ddsc LOCATION)
++endif()
+ get_target_property(gtest_lib GTest::GTest IMPORTED_LOCATION)
+ get_target_property(gtest_main_lib GTest::Main IMPORTED_LOCATION)
+ if(ENABLE_SHM)
+-- 
+2.30.2
+

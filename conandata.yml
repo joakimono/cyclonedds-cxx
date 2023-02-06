@@ -12,6 +12,10 @@ sources:
     sha256: 68e474148892f870c6456012ae935b53112b0810d3260ddc6c4ce9da9dc1b366
     url:
       - https://github.com/eclipse-cyclonedds/cyclonedds-cxx/archive/refs/tags/0.9.0a1.tar.gz
+  0.10.2:
+    sha256: ff016df46b23015f32a57a36c8e2ddc2597942bb64ebef951747c46266d15931
+    url:
+      - https://github.com/eclipse-cyclonedds/cyclonedds-cxx/archive/refs/tags/0.10.2.tar.gz
 dependencies:
   0.8.2:
     cyclonedds: "0.8.2@sintef/stable"
@@ -25,6 +29,11 @@ dependencies:
     cyclonedds: "0.9.0a1@sintef/stable"
     gtest: "[~1.10.0]"
     doxygen: "[~1.9.2]"
+  0.10.2:
+    cyclonedds: "0.10.2@sintef/stable"
+    gtest: "[~1.10.0]"
+    doxygen: "[~1.9.2]"
+    boost: "1.78.0"
 patches:
   0.8.2:
     - base_path: source_subfolder
@@ -53,3 +62,12 @@ patches:
       patch_file: patches/0.8.2-0003-datatopic-limits.patch
     - base_path: source_subfolder
       patch_file: patches/0.9.0a1-builtintopics-0003-TBuiltinTopicKeyImpl.patch
+  0.10.2:
+    - base_path: source_subfolder
+      patch_file: patches/0.10.2-0001-TypeKind-def-type.patch
+    - base_path: source_subfolder
+      patch_file: patches/0.10.2-0002-Include-limits-to-datatopic.hpp.patch
+    - base_path: source_subfolder
+      patch_file: patches/0.10.2-0003-Conanisation.patch
+    - base_path: source_subfolder
+      patch_file: patches/0.10.2-0004-idlcxx_generate.patch
