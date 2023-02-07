@@ -1,7 +1,7 @@
 [![GCC Conan](https://github.com/sintef-ocean/conan-cyclonedds-cxx/workflows/GCC%20Conan/badge.svg)](https://github.com/sintef-ocean/conan-cyclonedds-cxx/actions?query=workflow%3A"GCC+Conan")
 [![Clang Conan](https://github.com/sintef-ocean/conan-cyclonedds-cxx/workflows/Clang%20Conan/badge.svg)](https://github.com/sintef-ocean/conan-cyclonedds-cxx/actions?query=workflow%3A"Clang+Conan")
 [![MSVC Conan](https://github.com/sintef-ocean/conan-cyclonedds-cxx/workflows/MSVC%20Conan/badge.svg)](https://github.com/sintef-ocean/conan-cyclonedds-cxx/actions?query=workflow%3A"MSVC+Conan")
-
+[![Apple-Clang Conan](https://github.com/sintef-ocean/conan-cyclonedds-cxx/workflows/Apple-Clang%20Conan/badge.svg)](https://github.com/sintef-ocean/conan-cyclonedds-cxx/actions?query=workflow%3A"Apple-Clang+Conan")
 
 [Conan.io](https://conan.io) recipe for [cyclonedds-cxx](https://cyclonedds.io/).
 
@@ -21,7 +21,7 @@ The package is usually consumed using the `conan install` command or a *conanfil
 
    ```
    [requires]
-   cyclonedds-cxx/[>=0.8.2]@sintef/stable
+   cyclonedds-cxx/[>=0.10.2]@sintef/stable
 
    [options]
    None
@@ -36,7 +36,7 @@ The package is usually consumed using the `conan install` command or a *conanfil
 
    Insert into your *CMakeLists.txt* something like the following lines:
    ```cmake
-   cmake_minimum_required(VERSION 3.13)
+   cmake_minimum_required(VERSION 3.16)
    project(TheProject CXX)
 
    include(${CMAKE_BINARY_DIR}/conan_paths.cmake)
@@ -57,10 +57,14 @@ The package is usually consumed using the `conan install` command or a *conanfil
 
 ## Package options
 
-Option | Default | Domain
+Option | Values | Default
 ---|---|---
 shared | [True, False] | True
 with_shm | [True, False] | True
+with_ddslib | [True, False] | True (since 0.11.0)
+with_idllib | [True, False] | True (since 0.10.2)
+with_type_discovery | [True, False] | True (since 0.10.2)
+with_topic_discovery | [True, False] | True (since 0.10.2)
 with_doc | [True, False] | False
 with_examples | [True, False] | False
 with_tests | [True, False] | False
@@ -74,15 +78,8 @@ iceoryx_posh_testing | ANY | ""
 
 Option `with_shm=True` does not work on Windows until it is supported by `cyclonedds`.
 
-
 conan-center's package iceoryx does not provide the target
-`iceoryx_posh_roudi_environment`, (and `iceoryx_posh_testing::iceoryx_posh_testing`), so
-`with_tests=True` and `with_shm=True` not work unless the missing packages are found by
-CMake.  One workaround for this is to provide `CMAKE_PREFIX_PATH` using option
-`iceoryx_posh_testing`, i.e. specifying the path to the library cmake config scripts (or
-by installing iceoryx on a default search path).
-
-Builtin topic support is not included by default, but there is a cherry-picked variant
-`0.9.0a1-builtintopics`, using work referenced in
-[cyclonedds-cxx#135](https://github.com/eclipse-cyclonedds/cyclonedds-cxx/pull/135). Note
-that it seems not to work as intended yet.
+`iceoryx_posh_testing::iceoryx_posh_testing`, so `with_tests=True` and `with_shm=True` not
+work unless the missing packages are found by CMake.  One workaround for this is to
+    provide `CMAKE_PREFIX_PATH` using option `iceoryx_posh_testing`, i.e. specifying the path
+to the library cmake config scripts (or by installing iceoryx on a default search path).

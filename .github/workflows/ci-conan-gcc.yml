@@ -21,19 +21,21 @@ jobs:
         compiler_version: [8, 9, 10, 11]
         build_type: [Debug, Release]
         os: [ubuntu-20.04]
-        version: [0.8.2, 0.9.0a1]
+        version: [0.8.2, 0.10.2]
     container:
       image: conanio/gcc${{ matrix.compiler_version }}
       options: -u 0
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Install prerequisites
         run: |
           sudo apt-get update
           sudo pip3 install --upgrade setuptools pip
           sudo pip3 install --upgrade conan
       - name: Configure Conan
-        run: conan remote add sintef ${CONAN_UPLOAD} --insert 0
+        run: |
+          conan remote add sintef ${CONAN_UPLOAD} --insert 0
+          conan config set general.revisions_enabled=1
       - name: Conan create
         run: |
           conan create -s build_type=${{ matrix.build_type }} \
@@ -43,4 +45,4 @@ jobs:
             -b missing -b outdated . ${{ matrix.version }}@sintef/stable
       - name: Conan upload
         run: |
-          conan upload --all -c -r sintef ${SINTEF_REFERENCE} --retry 5 --retry-wait 20 --force
+          conan upload --all -c -r sintef ${SINTEF_REFERENCE} --retry 10 --retry-wait 25 --force

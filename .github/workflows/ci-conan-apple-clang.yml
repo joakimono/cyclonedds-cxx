@@ -21,15 +21,17 @@ jobs:
         compiler_version: ['13.0']
         build_type: [Debug, Release]
         os: [macos-11]
-        version: [0.8.2, 0.9.0a1]
+        version: [0.8.2, 0.10.2]
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Install prerequisites
         run: |
           pip3 install --upgrade setuptools pip requests
           pip3 install --upgrade conan
       - name: Configure Conan
-        run: conan remote add sintef ${CONAN_UPLOAD} --insert 0
+        run: |
+          conan remote add sintef ${CONAN_UPLOAD} --insert 0
+          conan config set general.revisions_enabled=1
       - name: Conan create
         run: |
           conan create \
@@ -41,4 +43,4 @@ jobs:
             -b missing -b outdated . ${{ matrix.version }}@sintef/stable
       - name: Conan upload
         run: |
-          conan upload --all -c -r sintef ${SINTEF_REFERENCE} --retry 5 --retry-wait 20 --force
+          conan upload --all -c -r sintef ${SINTEF_REFERENCE} --retry 10 --retry-wait 25 --force
