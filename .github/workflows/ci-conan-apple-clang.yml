@@ -30,7 +30,7 @@ jobs:
           pip3 install --upgrade conan
       - name: Configure Conan
         run: |
-          conan remote add sintef ${CONAN_UPLOAD} --insert 0
+          conan remote add sintef ${CONAN_UPLOAD}
           conan config set general.revisions_enabled=1
       - name: Conan create
         run: |
